@@ -1,7 +1,7 @@
 import React from "react";
 import { Coins } from "lucide-react";
 import { useAppContext } from "../contexts/AppContext";
-import { formatPriceAmount } from "../services/types";
+import { formatDate, formatPriceAmount } from "../services/types";
 import { League, Leagues } from "../data/leagues";
 
 const rateRows = [
@@ -56,7 +56,7 @@ const CurrencyRatesPage: React.FC = () => {
       <p className="text-gray-400 mb-4">
         Rates refresh automatically when the app starts and every hour.
         {currencyRatesUpdatedAt
-          ? ` Last updated ${new Date(currencyRatesUpdatedAt).toLocaleTimeString()}.`
+          ? ` Last updated ${formatDate(currencyRatesUpdatedAt)}.`
           : " Waiting for the first live refresh."}
       </p>
 

@@ -1,5 +1,6 @@
 import {
   formatItemMod,
+  formatDateTime,
   formatPriceAmount,
   ModifierSelection,
   Price,
@@ -209,6 +210,7 @@ export function PoeListItem(props: {
         const matchingItem = await PriceChecker.findMatchingItem(
           item,
           itemLeague,
+          props.modifierSelection,
         );
         if (!matchingItem?.id) {
           setSearchError("No trade search was created.");
@@ -472,6 +474,8 @@ export function PoeListItem(props: {
               {hasGreatPrice
                 ? "Already with a great price!"
                 : `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency} | Spread: ${formatPriceAmount(priceEstimate.stdDev.amount)} ${priceEstimate.stdDev.currency}`}
+              {priceEstimate.checkedAt !== undefined &&
+                ` | Checked at: ${formatDateTime(priceEstimate.checkedAt)}`}
             </p>
           </details>
         )}

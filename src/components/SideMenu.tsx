@@ -42,7 +42,7 @@ export const SideMenu: React.FC<SideMenuProps> = ({ isOpen, onClose }) => {
           onClick={handleLinkClick}
         >
           <MessageSquare className="h-5 w-5 mr-3" />
-          <span>Messages</span>
+          <span>Chat Monitor</span>
         </Link>
         <Link
           to="/currency-rates"
