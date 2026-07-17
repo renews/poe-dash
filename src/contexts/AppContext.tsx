@@ -26,6 +26,72 @@ import { Job } from "../jobs/Job";
 import { handleJob } from "../components/JobQueue";
 import { Leagues, League } from "../data/leagues";
 
+export const MODIFIER_SELECTIONS_STORAGE_KEY = "modifierSelections";
+
+function isBooleanArray(value: unknown): value is boolean[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "boolean");
+}
+
+function isModifierSelection(value: unknown): value is ModifierSelection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const selection = value as Partial<ModifierSelection>;
+  return (
+    isBooleanArray(selection.explicit) &&
+    isBooleanArray(selection.implicit) &&
+    (selection.itemLevel === undefined || typeof selection.itemLevel === "boolean")
+  );
+}
+
+export function parseModifierSelections(
+  value: string | null,
+): Record<string, ModifierSelection> {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, ModifierSelection] =>
+          isModifierSelection(entry[1]),
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function loadModifierSelections() {
+  if (typeof localStorage === "undefined") {
+    return {};
+  }
+
+  return parseModifierSelections(
+    localStorage.getItem(MODIFIER_SELECTIONS_STORAGE_KEY),
+  );
+}
+
+function persistModifierSelections(
+  selections: Record<string, ModifierSelection>,
+) {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+
+  localStorage.setItem(
+    MODIFIER_SELECTIONS_STORAGE_KEY,
+    JSON.stringify(selections),
+  );
+}
+
 interface AppContextType {
   accountName: string;
   setAccountName: Dispatch<SetStateAction<string>>;
@@ -107,7 +173,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   >({});
   const [modifierSelections, setModifierSelections] = useState<
     Record<string, ModifierSelection>
-  >({});
+  >(loadModifierSelections);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job<any>[]>([]);
   const [currencyRates, setCurrencyRates] = useState<CurrencyRates>({});
@@ -295,6 +361,10 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       priceCheckCooldownMinutes.toString(),
     );
   }, [priceCheckCooldownMinutes]);
+
+  useEffect(() => {
+    persistModifierSelections(modifierSelections);
+  }, [modifierSelections]);
 
   useEffect(() => {
     updateStashTabs(items);
