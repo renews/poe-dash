@@ -5,6 +5,7 @@ export type Poe2ItemSearch = Partial<{
   rarity: string;
   ilvl: number;
   quality: number;
+  quality_max: number;
 
   explicit?: Array<{ id: string; min?: number; max?: number }>;
   implicit?: Array<{ id: string; min?: number; max?: number }>;
@@ -34,6 +35,7 @@ export type Poe2ItemSearch = Partial<{
 
   // misc
   gem_level: number;
+  gem_level_max: number;
   gem_sockets: number;
   area_level: number;
   stack_size: number;
@@ -120,6 +122,7 @@ export interface ExchangeCurrencyItem {
 export type Price = {
   amount: number;
   currency: string;
+  lowerPrice?: Price;
 };
 
 export function formatPriceAmount(amount: number): string {
@@ -129,7 +132,13 @@ export function formatPriceAmount(amount: number): string {
 
   const absoluteAmount = Math.abs(amount);
   const decimals =
-    absoluteAmount >= 100 ? 0 : absoluteAmount >= 1 ? 2 : absoluteAmount >= 0.1 ? 3 : 4;
+    absoluteAmount >= 100
+      ? 0
+      : absoluteAmount >= 1
+        ? 2
+        : absoluteAmount >= 0.1
+          ? 3
+          : 4;
 
   return amount.toFixed(decimals).replace(/\.?0+$/, "");
 }
@@ -142,13 +151,56 @@ export type ItemMod =
       mods: unknown[];
     };
 
+export type ModifierSection = "implicit" | "explicit" | "enchant";
+export type ModifierDisplayKind = ModifierSection | "prefix" | "suffix";
+
 export function formatItemMod(mod: ItemMod): string {
   return typeof mod === "string" ? mod : mod.description;
+}
+
+export function normalizeModifierHash(hash: string) {
+  return hash.startsWith("stat.") ? hash.slice("stat.".length) : hash;
+}
+
+export function getModifierDisplayKind(
+  item: Poe2Item,
+  section: ModifierSection,
+  index: number,
+): ModifierDisplayKind {
+  if (section !== "explicit") {
+    return section;
+  }
+
+  const tier =
+    item.item?.extended?.mods?.explicit?.[index]?.tier?.toLowerCase();
+  if (tier?.startsWith("p") || tier?.includes("prefix")) {
+    return "prefix";
+  }
+
+  if (tier?.startsWith("s") || tier?.includes("suffix")) {
+    return "suffix";
+  }
+
+  return section;
+}
+
+export function getItemModifierHash(
+  item: Poe2Item,
+  section: ModifierSection,
+  index: number,
+  mod?: ItemMod,
+) {
+  const structuredHash = mod && typeof mod !== "string" ? mod.hash : undefined;
+  const extendedHash = item.item?.extended?.hashes?.[section]?.[index]?.[0];
+  const hash = structuredHash || extendedHash;
+
+  return hash ? normalizeModifierHash(hash) : undefined;
 }
 
 export type ModifierSelection = {
   implicit: boolean[];
   explicit: boolean[];
+  itemLevel?: boolean;
 };
 
 export interface Poe2Item {
@@ -181,6 +233,8 @@ export interface Poe2Item {
     icon: string;
     league: string;
     id: string;
+    gemLevel?: number;
+    quality?: number;
     sockets?: Array<unknown>;
     name: string;
     typeLine: string;

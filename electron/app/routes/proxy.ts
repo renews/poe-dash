@@ -3,16 +3,19 @@ import { app, net, session, BrowserWindow } from "electron";
 import WebSocket from "ws";
 import { RateLimits } from "../services/RateLimitParser";
 
-const hosts = [{ url: "www.pathofexile.com" }, { url: "poe.ninja" }];
+const hosts = [
+  { url: "www.pathofexile.com" },
+  { url: "poe.ninja" },
+  { url: "poe2base.com" },
+];
 let blocked = false;
 const blockedMsg = "This application is being blocked by pathofexile.com";
 
 export const proxy = async (req: Request, res: Response) => {
-
-  if(blocked) {
+  if (blocked) {
     console.log(blockedMsg);
     res.writeHead(500);
-    res.end(blockedMsg)
+    res.end(blockedMsg);
     return;
   }
 
@@ -47,7 +50,8 @@ export const proxy = async (req: Request, res: Response) => {
       method: req.method,
       headers: {
         ...req.headers,
-        "user-agent": app.userAgentFallback + "(contact: micahriggan@gmail.com)",
+        "user-agent":
+          app.userAgentFallback + "(contact: micahriggan@gmail.com)",
       },
       useSessionCookies: true,
       referrerPolicy: "no-referrer-when-downgrade",

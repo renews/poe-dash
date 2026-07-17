@@ -3,15 +3,25 @@ import React, {
   useState,
   useContext,
   useEffect,
+  useCallback,
   Dispatch,
   SetStateAction,
 } from "react";
 import { Poe2Trade } from "../services/poe2trade";
-import { PriceChecker, Estimate } from "../services/PriceEstimator";
+import {
+  CURRENCY_RATE_REFRESH_INTERVAL_MS,
+  DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES,
+  CurrencyRates,
+  PriceChecker,
+  Estimate,
+} from "../services/PriceEstimator";
 import { ModifierSelection, Poe2Item } from "../services/types";
 import { SyncAccount } from "../jobs/SyncAccount";
 import { RefreshAllItems } from "../jobs/RefreshAllItems";
-import { PriceCheckAllItems } from "../jobs/PriceCheckAllItems";
+import {
+  getPriceCheckProgressLabel,
+  PriceCheckAllItems,
+} from "../jobs/PriceCheckAllItems";
 import { Job } from "../jobs/Job";
 import { handleJob } from "../components/JobQueue";
 import { Leagues, League } from "../data/leagues";
@@ -33,6 +43,13 @@ interface AppContextType {
   isLiveMonitoring: boolean;
   setIsLiveMonitoring: Dispatch<SetStateAction<boolean>>;
   isPriceChecking: boolean;
+  priceCheckProgress: string;
+  priceCheckCooldownMinutes: number;
+  setPriceCheckCooldownMinutes: Dispatch<SetStateAction<number>>;
+  currencyRates: CurrencyRates;
+  currencyRatesUpdatedAt: number | null;
+  isRefreshingCurrencyRates: boolean;
+  refreshCurrencyRates: () => Promise<void>;
   priceEstimates: Record<string, Estimate>;
   modifierSelections: Record<string, ModifierSelection>;
   setModifierSelection: (itemId: string, selection: ModifierSelection) => void;
@@ -52,9 +69,14 @@ interface AppContextType {
   filteredItems: Poe2Item[];
 }
 
-const AppContext = createContext<AppContextType | undefined>(
-  undefined,
-);
+const AppContext = createContext<AppContextType | undefined>(undefined);
+
+function getSavedPriceCheckCooldown() {
+  const saved = Number(localStorage.getItem("priceCheckCooldownMinutes"));
+  return Number.isFinite(saved) && saved >= 0
+    ? saved
+    : DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES;
+}
 
 export const useAppContext = () => {
   const context = useContext(AppContext);
@@ -76,6 +98,10 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   const [searchTerm, setSearchTerm] = useState<string>("");
   const [isLiveMonitoring, setIsLiveMonitoring] = useState<boolean>(false);
   const [isPriceChecking, setIsPriceChecking] = useState<boolean>(false);
+  const [priceCheckProgress, setPriceCheckProgress] = useState("");
+  const [priceCheckCooldownMinutes, setPriceCheckCooldownMinutes] = useState(
+    getSavedPriceCheckCooldown,
+  );
   const [priceEstimates, setPriceEstimates] = useState<
     Record<string, Estimate>
   >({});
@@ -84,11 +110,69 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   >({});
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job<any>[]>([]);
+  const [currencyRates, setCurrencyRates] = useState<CurrencyRates>({});
+  const [currencyRatesUpdatedAt, setCurrencyRatesUpdatedAt] = useState<
+    number | null
+  >(null);
+  const [isRefreshingCurrencyRates, setIsRefreshingCurrencyRates] =
+    useState(false);
+
+  const refreshCurrencyRates = useCallback(async () => {
+    setIsRefreshingCurrencyRates(true);
+
+    try {
+      const rates = await PriceChecker.refreshExchangeRates(selectedLeague);
+      if (Object.keys(rates).length) {
+        setCurrencyRates(rates);
+        setCurrencyRatesUpdatedAt(Date.now());
+      }
+    } finally {
+      setIsRefreshingCurrencyRates(false);
+    }
+  }, [selectedLeague]);
 
   const updateStashTabs = (items: Poe2Item[]) => {
     const stashes = Poe2Trade.getStashTabs(items);
     setStashTabs(["All", ...Object.keys(stashes).sort()]);
     setSelectedStash("All");
+  };
+
+  const priceCheckItems = async (itemsToCheck: Poe2Item[]) => {
+    setIsPriceChecking(true);
+    setPriceCheckProgress(
+      itemsToCheck.length
+        ? `Preparing to check ${itemsToCheck.length} item${itemsToCheck.length === 1 ? "" : "s"}...`
+        : "",
+    );
+    const priceCheck = new PriceCheckAllItems(
+      itemsToCheck,
+      true,
+      selectedLeague,
+      modifierSelections,
+      priceCheckCooldownMinutes,
+    );
+
+    priceCheck.onCancel = async () => {
+      setIsPriceChecking(false);
+      setPriceCheckProgress("");
+    };
+
+    priceCheck.onStep = async (progress) => {
+      console.log("price check", progress);
+      setPriceEstimates(PriceChecker.getCachedEstimates());
+    };
+
+    priceCheck.onItemStart = ({ current, total, item }) => {
+      setPriceCheckProgress(getPriceCheckProgressLabel(current, total, item));
+    };
+
+    try {
+      await handleJob(priceCheck, setJobs, setErrorMessage);
+      setPriceEstimates(PriceChecker.getCachedEstimates());
+    } finally {
+      setIsPriceChecking(false);
+      setPriceCheckProgress("");
+    }
   };
 
   const getItems = async (name: string) => {
@@ -104,6 +188,13 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     };
 
     await handleJob(sync, setJobs, setErrorMessage);
+
+    const accountItems = await Poe2Trade.getAllCachedAccountItems(name);
+    setItems(accountItems);
+    updateStashTabs(accountItems);
+    if (accountItems.length) {
+      await priceCheckItems(accountItems);
+    }
   };
 
   const filterByStash = (stash: string) => {
@@ -150,23 +241,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const priceCheckAllItems = async () => {
-    setIsPriceChecking(true);
-    const priceCheck = new PriceCheckAllItems(
-      filteredItems,
-      true,
-      selectedLeague,
-      modifierSelections,
-    );
-
-    priceCheck.onStep = async (progress) => {
-      console.log("price check", progress);
-      setPriceEstimates(PriceChecker.getCachedEstimates());
-    };
-
-    await handleJob(priceCheck, setJobs, setErrorMessage);
-    setPriceEstimates(PriceChecker.getCachedEstimates());
-
-    setIsPriceChecking(false);
+    await priceCheckItems(filteredItems);
   };
 
   const filterItems = (items: Poe2Item[], stash: string, search: string) => {
@@ -205,6 +280,23 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   }, []);
 
   useEffect(() => {
+    void refreshCurrencyRates();
+    const interval = window.setInterval(
+      () => void refreshCurrencyRates(),
+      CURRENCY_RATE_REFRESH_INTERVAL_MS,
+    );
+
+    return () => window.clearInterval(interval);
+  }, [refreshCurrencyRates]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      "priceCheckCooldownMinutes",
+      priceCheckCooldownMinutes.toString(),
+    );
+  }, [priceCheckCooldownMinutes]);
+
+  useEffect(() => {
     updateStashTabs(items);
   }, [items]);
 
@@ -225,6 +317,13 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     isLiveMonitoring,
     setIsLiveMonitoring,
     isPriceChecking,
+    priceCheckProgress,
+    priceCheckCooldownMinutes,
+    setPriceCheckCooldownMinutes,
+    currencyRates,
+    currencyRatesUpdatedAt,
+    isRefreshingCurrencyRates,
+    refreshCurrencyRates,
     priceEstimates,
     modifierSelections,
     setModifierSelection,
@@ -241,9 +340,5 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     filteredItems,
   };
 
-  return (
-    <AppContext.Provider value={value}>
-      {children}
-    </AppContext.Provider>
-  );
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 };

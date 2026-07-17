@@ -2,10 +2,14 @@ import {
   formatItemMod,
   formatPriceAmount,
   ModifierSelection,
+  Price,
   Poe2Item,
+  getItemModifierHash,
+  getModifierDisplayKind,
+  ModifierDisplayKind,
 } from "../services/types";
 import { useState } from "react";
-import { Estimate, PriceChecker } from "../services/PriceEstimator";
+import { Estimate, isGemItem, PriceChecker } from "../services/PriceEstimator";
 
 const ItemNameWithRarity: React.FC<{ item: Poe2Item }> = ({ item }) => {
   const getRarityColor = (rarity: string = "magic") => {
@@ -32,13 +36,38 @@ const ItemNameWithRarity: React.FC<{ item: Poe2Item }> = ({ item }) => {
   );
 };
 
-type ModifierKind = keyof ModifierSelection;
+type ModifierKind = "implicit" | "explicit";
 
-const ComparableItemTooltip: React.FC<{ item: Poe2Item }> = ({ item }) => {
-  const renderMods = (mods: Poe2Item["item"]["explicitMods"]) =>
-    mods?.map((mod, index) => (
-      <li key={index}>{formatItemMod(mod)}</li>
-    ));
+const ComparableItemTooltip: React.FC<{
+  item: Poe2Item;
+  usedExplicitHashes?: Set<string>;
+  usedImplicitHashes?: Set<string>;
+}> = ({ item, usedExplicitHashes, usedImplicitHashes }) => {
+  const renderMods = (
+    mods: Poe2Item["item"]["explicitMods"],
+    section: "implicit" | "explicit" | "enchant",
+  ) =>
+    mods?.map((mod, index) => {
+      const kind = getModifierDisplayKind(item, section, index);
+      const usedHashes =
+        section === "explicit"
+          ? usedExplicitHashes
+          : section === "implicit"
+            ? usedImplicitHashes
+            : undefined;
+      const hash = getItemModifierHash(item, section, index, mod);
+      const isUsed = !usedHashes || !hash || usedHashes.has(hash);
+
+      return (
+        <li
+          key={index}
+          className={`${modifierColorClass(kind)} ${isUsed ? "" : "line-through opacity-60"}`}
+          title={isUsed ? kind : `${kind} · not used in search`}
+        >
+          {formatItemMod(mod)}
+        </li>
+      );
+    });
 
   return (
     <div className="pointer-events-none invisible absolute left-0 top-full z-50 mt-2 w-96 max-w-[calc(100vw-2rem)] rounded-md border border-gray-500 bg-gray-900 p-3 text-left text-xs text-gray-100 shadow-2xl group-hover:visible group-focus-within:visible">
@@ -70,7 +99,8 @@ const ComparableItemTooltip: React.FC<{ item: Poe2Item }> = ({ item }) => {
         <ul className="mt-2 space-y-1 text-gray-300">
           {item.item.properties.map((property, index) => (
             <li key={index}>
-              {property.name}: {property.values.map((value) => value[0]).join(", ")}
+              {property.name}:{" "}
+              {property.values.map((value) => value[0]).join(", ")}
             </li>
           ))}
         </ul>
@@ -80,7 +110,7 @@ const ComparableItemTooltip: React.FC<{ item: Poe2Item }> = ({ item }) => {
         <div className="mt-2">
           <p className="font-semibold text-blue-300">Implicit</p>
           <ul className="space-y-1 text-blue-200">
-            {renderMods(item.item.implicitMods)}
+            {renderMods(item.item.implicitMods, "implicit")}
           </ul>
         </div>
       ) : null}
@@ -89,7 +119,7 @@ const ComparableItemTooltip: React.FC<{ item: Poe2Item }> = ({ item }) => {
         <div className="mt-2">
           <p className="font-semibold text-purple-300">Enchant</p>
           <ul className="space-y-1 text-purple-200">
-            {renderMods(item.item.enchantMods)}
+            {renderMods(item.item.enchantMods, "enchant")}
           </ul>
         </div>
       ) : null}
@@ -98,7 +128,7 @@ const ComparableItemTooltip: React.FC<{ item: Poe2Item }> = ({ item }) => {
         <div className="mt-2">
           <p className="font-semibold text-gray-300">Explicit</p>
           <ul className="space-y-1 text-gray-200">
-            {renderMods(item.item.explicitMods)}
+            {renderMods(item.item.explicitMods, "explicit")}
           </ul>
         </div>
       ) : null}
@@ -117,7 +147,7 @@ export function PoeListItem(props: {
   league: string;
   modifierSelection?: ModifierSelection;
   onModifierSelectionChange?: (selection: ModifierSelection) => void;
-  priceSuggestion?: { amount: number; currency: string };
+  priceSuggestion?: Price;
   priceEstimate?: Estimate;
   onPriceClick?: (
     item: Poe2Item,
@@ -129,6 +159,7 @@ export function PoeListItem(props: {
   const [searchId, setSearchId] = useState<string | null>(null);
   const [isPriceChecking, setIsPriceChecking] = useState(false);
   const [priceCheckError, setPriceCheckError] = useState<string | null>(null);
+  const gemItem = isGemItem(item);
 
   const isModifierSelected = (kind: ModifierKind, index: number) =>
     props.modifierSelection?.[kind]?.[index] !== false;
@@ -143,8 +174,8 @@ export function PoeListItem(props: {
         ? item.item.implicitMods || []
         : item.item.explicitMods || [];
     const current = props.modifierSelection?.[kind] || [];
-    const values = modifiers.map((_modifier, modifierIndex) =>
-      current[modifierIndex] !== false,
+    const values = modifiers.map(
+      (_modifier, modifierIndex) => current[modifierIndex] !== false,
     );
     values[index] = checked;
 
@@ -152,13 +183,14 @@ export function PoeListItem(props: {
       implicit:
         kind === "implicit"
           ? values
-          : (props.modifierSelection?.implicit ||
-              (item.item.implicitMods || []).map(() => true)),
+          : props.modifierSelection?.implicit ||
+            (item.item.implicitMods || []).map(() => true),
       explicit:
         kind === "explicit"
           ? values
-          : (props.modifierSelection?.explicit ||
-              (item.item.explicitMods || []).map(() => true)),
+          : props.modifierSelection?.explicit ||
+            (item.item.explicitMods || []).map(() => true),
+      itemLevel: props.modifierSelection?.itemLevel === true,
     });
   };
 
@@ -170,7 +202,10 @@ export function PoeListItem(props: {
     const itemLeague = item.item?.league || props.league;
 
     if (!searchId) {
-      const matchingItem = await PriceChecker.findMatchingItem(item, itemLeague);
+      const matchingItem = await PriceChecker.findMatchingItem(
+        item,
+        itemLeague,
+      );
       if (matchingItem && matchingItem.id) {
         setSearchId(matchingItem.id);
         window.open(
@@ -202,6 +237,7 @@ export function PoeListItem(props: {
           (_modifier, index) =>
             props.modifierSelection?.explicit?.[index] !== false,
         ),
+        itemLevel: !gemItem && props.modifierSelection?.itemLevel === true,
       });
     } catch (error) {
       setPriceCheckError(
@@ -213,6 +249,14 @@ export function PoeListItem(props: {
   };
 
   const itemLeague = item.item?.league || props.league;
+  const priceEstimate = props.priceEstimate;
+  const hasGreatPrice = priceEstimate?.matchesCurrentPrice === true;
+  const usedExplicitHashes = priceEstimate?.search?.explicitHashes
+    ? new Set(priceEstimate.search.explicitHashes)
+    : undefined;
+  const usedImplicitHashes = priceEstimate?.search?.implicitHashes
+    ? new Set(priceEstimate.search.implicitHashes)
+    : undefined;
 
   const buttonStyle = `bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md transition duration-300 ease-in-out w-full`;
 
@@ -234,9 +278,17 @@ export function PoeListItem(props: {
             <div className="font-semibold text-green-600 text-lg">
               {item.listing.price.amount} {item.listing.price.currency}
               {props.priceSuggestion && (
-                <p className="font-semibold text-orange-600">
-                  estimate: ~{formatPriceAmount(props.priceSuggestion.amount)}{" "}
-                  {props.priceSuggestion.currency}
+                <p
+                  className="font-semibold text-orange-600"
+                  title={
+                    !hasGreatPrice && props.priceSuggestion.lowerPrice
+                      ? `Lower denomination: ${formatPriceAmount(props.priceSuggestion.lowerPrice.amount)} ${props.priceSuggestion.lowerPrice.currency}`
+                      : undefined
+                  }
+                >
+                  {hasGreatPrice
+                    ? "Already with a great price!"
+                    : `suggested price: ~${formatPriceAmount(props.priceSuggestion.amount)} ${props.priceSuggestion.currency}`}
                 </p>
               )}
             </div>
@@ -248,6 +300,30 @@ export function PoeListItem(props: {
         )}
 
         <div className="space-y-4">
+          {!gemItem && (
+            <div className="bg-gray-700 p-3 rounded-md">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={props.modifierSelection?.itemLevel === true}
+                  onChange={(event) =>
+                    props.onModifierSelectionChange?.({
+                      implicit:
+                        props.modifierSelection?.implicit ||
+                        (item.item.implicitMods || []).map(() => true),
+                      explicit:
+                        props.modifierSelection?.explicit ||
+                        (item.item.explicitMods || []).map(() => true),
+                      itemLevel: event.target.checked,
+                    })
+                  }
+                  className="form-checkbox text-blue-600"
+                />
+                <span>Item level (minimum): {item.item.ilvl}</span>
+              </label>
+            </div>
+          )}
+
           {item.item.implicitMods && item.item.implicitMods.length > 0 && (
             <div className="bg-gray-700 p-3 rounded-md">
               <h3 className="font-semibold text-blue-300 mb-1">
@@ -255,7 +331,12 @@ export function PoeListItem(props: {
               </h3>
               <ul className="list-none text-sm text-left space-y-1">
                 {item.item.implicitMods?.map((mod, index) => (
-                  <li key={index} className="text-blue-200">
+                  <li
+                    key={index}
+                    className={modifierColorClass(
+                      getModifierDisplayKind(item, "implicit", index),
+                    )}
+                  >
                     <label className="flex cursor-pointer items-start gap-2">
                       <input
                         type="checkbox"
@@ -296,7 +377,12 @@ export function PoeListItem(props: {
             <h3 className="font-semibold text-gray-300 mb-1">Explicit Mods:</h3>
             <ul className="list-none text-sm text-left space-y-1">
               {item.item.explicitMods?.map((mod, index) => (
-                <li key={index} className="text-gray-200">
+                <li
+                  key={index}
+                  className={modifierColorClass(
+                    getModifierDisplayKind(item, "explicit", index),
+                  )}
+                >
                   <label className="flex cursor-pointer items-start gap-2">
                     <input
                       type="checkbox"
@@ -318,23 +404,37 @@ export function PoeListItem(props: {
           </div>
         </div>
 
-        {props.priceEstimate && (
+        {priceEstimate && (
           <details open className="bg-gray-700 p-3 rounded-md mb-4 text-left">
             <summary className="cursor-pointer font-semibold text-orange-300">
-              Price check used {props.priceEstimate.comparables?.length || 0} listings
+              Suggested price uses {priceEstimate.comparables?.length || 0}{" "}
+              listings
             </summary>
-            <p className="text-sm text-gray-300 mt-2">
-              Search: {props.priceEstimate.search?.name || props.priceEstimate.search?.baseType || "item"}
-              {props.priceEstimate.search?.rarity
-                ? ` (${props.priceEstimate.search.rarity})`
+            <p
+              className="text-sm text-gray-300 mt-2"
+              title={
+                priceEstimate.price.lowerPrice
+                  ? `Lower denomination: ${formatPriceAmount(priceEstimate.price.lowerPrice.amount)} ${priceEstimate.price.lowerPrice.currency}`
+                  : undefined
+              }
+            >
+              Search:{" "}
+              {priceEstimate.search?.name ||
+                priceEstimate.search?.baseType ||
+                "item"}
+              {priceEstimate.search?.rarity
+                ? ` (${priceEstimate.search.rarity})`
                 : ""}
-              {props.priceEstimate.search?.league
-                ? ` in ${props.priceEstimate.search.league}`
+              {priceEstimate.search?.league
+                ? ` in ${priceEstimate.search.league}`
                 : ""}
-              {` · ${props.priceEstimate.search?.explicitCount || 0} explicit, ${props.priceEstimate.search?.implicitCount || 0} implicit modifiers`}
+              {` · ${priceEstimate.search?.explicitCount || 0} explicit, ${priceEstimate.search?.implicitCount || 0} implicit modifiers`}
+              {priceEstimate.search?.itemLevel !== undefined
+                ? ` · item level ≥ ${priceEstimate.search.itemLevel}`
+                : ""}
             </p>
             <ul className="text-sm text-gray-200 mt-2 space-y-1">
-              {(props.priceEstimate.comparables || []).map((comparable, index) => (
+              {(priceEstimate.comparables || []).map((comparable, index) => (
                 <li
                   key={`${comparable.itemId}-${index}`}
                   tabIndex={comparable.item ? 0 : undefined}
@@ -349,14 +449,19 @@ export function PoeListItem(props: {
                     )}
                   </span>
                   {comparable.item && (
-                    <ComparableItemTooltip item={comparable.item} />
+                    <ComparableItemTooltip
+                      item={comparable.item}
+                      usedExplicitHashes={usedExplicitHashes}
+                      usedImplicitHashes={usedImplicitHashes}
+                    />
                   )}
                 </li>
               ))}
             </ul>
             <p className="text-sm text-gray-300 mt-2">
-              Average: {formatPriceAmount(props.priceEstimate.price.amount)} {props.priceEstimate.price.currency}
-              {` | Spread: ${formatPriceAmount(props.priceEstimate.stdDev.amount)} ${props.priceEstimate.stdDev.currency}`}
+              {hasGreatPrice
+                ? "Already with a great price!"
+                : `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency} | Spread: ${formatPriceAmount(priceEstimate.stdDev.amount)} ${priceEstimate.stdDev.currency}`}
             </p>
           </details>
         )}
@@ -398,4 +503,19 @@ export function PoeListItem(props: {
       </div>
     </div>
   );
+}
+
+function modifierColorClass(kind: ModifierDisplayKind) {
+  switch (kind) {
+    case "implicit":
+      return "text-blue-200";
+    case "enchant":
+      return "text-purple-200";
+    case "prefix":
+      return "text-cyan-200";
+    case "suffix":
+      return "text-fuchsia-200";
+    default:
+      return "text-gray-200";
+  }
 }

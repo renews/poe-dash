@@ -23,6 +23,9 @@ const MainPage: React.FC = () => {
     isLiveMonitoring,
     setIsLiveMonitoring,
     isPriceChecking,
+    priceCheckProgress,
+    priceCheckCooldownMinutes,
+    setPriceCheckCooldownMinutes,
     priceEstimates,
     modifierSelections,
     setModifierSelection,
@@ -67,12 +70,14 @@ const MainPage: React.FC = () => {
             className="border p-2"
           >
             {Leagues.map((league) => (
-              <option key={league} value={league}>{league}</option>
+              <option key={league} value={league}>
+                {league}
+              </option>
             ))}
           </select>
           <button type="submit" className="bg-blue-500 text-white p-2 rounded">
-          Submit
-        </button>
+            Submit
+          </button>
         </div>
       </form>
 
@@ -109,10 +114,28 @@ const MainPage: React.FC = () => {
 
           <button
             onClick={priceCheckAllItems}
+            disabled={isPriceChecking}
             className="bg-green-500 text-white p-2 rounded disabled:bg-gray-400"
           >
             {isPriceChecking ? "Checking Prices..." : "Price Check All"}
           </button>
+          <label className="flex items-center gap-2 text-sm text-gray-300">
+            Recheck after
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={priceCheckCooldownMinutes}
+              onChange={(event) =>
+                setPriceCheckCooldownMinutes(
+                  Math.max(0, Number(event.target.value) || 0),
+                )
+              }
+              className="w-16 border p-1 text-gray-900"
+              title="Minutes to reuse a recent whole-tab price check. Set to 0 to always recheck."
+            />
+            min
+          </label>
           <LiveMonitorButton
             accountName={accountName}
             league={selectedLeague}
@@ -148,6 +171,9 @@ const MainPage: React.FC = () => {
       {isPriceChecking && (
         <div className="text-blue-500 mb-4">
           Price checking in progress... Please wait.
+          {priceCheckProgress && (
+            <div className="text-sm mt-1">{priceCheckProgress}</div>
+          )}
         </div>
       )}
 

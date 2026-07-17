@@ -2,6 +2,7 @@ import {
   formatItemMod,
   ItemMod,
   ModifierSelection,
+  normalizeModifierHash,
   Price,
   Poe2Item,
 } from "./types";
@@ -19,6 +20,8 @@ export type ComparablePrice = Price & {
   item?: Poe2Item;
 };
 export type Estimate = {
+  checkedAt?: number;
+  matchesCurrentPrice?: boolean;
   price: Price;
   stdDev: Price;
   comparables: ComparablePrice[];
@@ -27,12 +30,35 @@ export type Estimate = {
     baseType?: string;
     name?: string;
     rarity?: string;
+    itemLevel?: number;
     explicitCount: number;
     implicitCount?: number;
     explicitHashes?: string[];
     implicitHashes?: string[];
   };
 };
+
+export const DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES = 5;
+export const CURRENCY_RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+
+const CURRENCY_IDS = ["exalted", "chaos", "divine", "mirror"] as const;
+export type CurrencyRates = Record<string, number>;
+
+export function isEstimateFresh(
+  estimate: Pick<Estimate, "checkedAt">,
+  cooldownMinutes: number,
+  now = Date.now(),
+) {
+  if (
+    cooldownMinutes <= 0 ||
+    typeof estimate.checkedAt !== "number" ||
+    !Number.isFinite(estimate.checkedAt)
+  ) {
+    return false;
+  }
+
+  return now - estimate.checkedAt < cooldownMinutes * 60_000;
+}
 
 export function getExchangeRateCacheKey(
   iWant: string,
@@ -47,7 +73,9 @@ export function getComparablePriceCurrency(
   currencies: string[],
 ) {
   const uniqueCurrencies = [...new Set(currencies)];
-  return uniqueCurrencies.length === 1 ? uniqueCurrencies[0] : preferredCurrency;
+  return uniqueCurrencies.length === 1
+    ? uniqueCurrencies[0]
+    : preferredCurrency;
 }
 
 export function selectSelectedModifiers<T>(
@@ -57,8 +85,17 @@ export function selectSelectedModifiers<T>(
   return modifiers.filter((_modifier, index) => selection?.[index] !== false);
 }
 
-function normalizeStatHash(hash: string) {
-  return hash.startsWith("stat.") ? hash.slice("stat.".length) : hash;
+export function roundCurrencyAmount(amount: number) {
+  return Math.floor(amount + 0.5);
+}
+
+function getNumericItemProperty(item: Poe2Item, name: string) {
+  const property = item.item?.properties?.find(
+    (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+  );
+  const value = property?.values?.[0]?.[0];
+  const numericValue = value?.match(/[-+]?\d+(?:\.\d+)?/)?.[0];
+  return numericValue === undefined ? undefined : Number(numericValue);
 }
 
 export function getItemSearchMetadata(item: Poe2Item) {
@@ -70,23 +107,61 @@ export function getItemSearchMetadata(item: Poe2Item) {
   };
   const rawRarity =
     item.item?.rarity || frameRarities[item.item?.frameType ?? -1];
-  const rarity = rawRarity?.toLowerCase();
   const baseType = item.item?.baseType || item.item?.typeLine;
+  const gemLevel = item.item?.gemLevel ?? getNumericItemProperty(item, "Level");
+  const quality = item.item?.quality ?? getNumericItemProperty(item, "Quality");
+  const isGem = isGemItem(item);
+  const rarity = isGem ? undefined : rawRarity?.toLowerCase();
 
   return {
     baseType,
     name:
-      rarity === "unique"
+      rarity === "unique" || isGem
         ? item.item?.name || item.item?.typeLine
         : undefined,
     rarity,
+    ...(!isGem && item.item?.ilvl !== undefined
+      ? { itemLevel: item.item.ilvl }
+      : {}),
+    ...(gemLevel !== undefined ? { gemLevel } : {}),
+    ...(quality !== undefined ? { quality } : {}),
+  };
+}
+
+export function isGemItem(item: Poe2Item) {
+  const rarity = item.item?.rarity?.toLowerCase();
+  const gemLevel = item.item?.gemLevel ?? getNumericItemProperty(item, "Level");
+  return (
+    item.item?.frameType === 4 || rarity === "gem" || gemLevel !== undefined
+  );
+}
+
+export function getItemSearchFilters(
+  metadata: {
+    itemLevel?: number;
+    gemLevel?: number;
+    quality?: number;
+  },
+  includeItemLevel = false,
+) {
+  return {
+    ...(includeItemLevel && metadata.itemLevel !== undefined
+      ? { ilvl: metadata.itemLevel }
+      : {}),
+    ...(metadata.gemLevel !== undefined
+      ? { gem_level: metadata.gemLevel, gem_level_max: metadata.gemLevel }
+      : {}),
+    ...(metadata.quality !== undefined
+      ? { quality: metadata.quality, quality_max: metadata.quality }
+      : {}),
   };
 }
 
 class PriceEstimator {
   async findMatchingItem(item: Poe2Item, league?: string) {
     const itemLeague = item.item?.league || league;
-    const { baseType, name, rarity } = getItemSearchMetadata(item);
+    const metadata = getItemSearchMetadata(item);
+    const { baseType, name, rarity } = metadata;
     if (!baseType) {
       throw new Error("Item data is incomplete: base type is missing.");
     }
@@ -105,18 +180,25 @@ class PriceEstimator {
       .filter((p) => p);
     const topStats = highTierStats.length
       ? highTierStats
-      : (parsedMods.explicits || []).slice(0, parsedMods.explicits?.length || 0);
+      : (parsedMods.explicits || []).slice(
+          0,
+          parsedMods.explicits?.length || 0,
+        );
 
-    const topMatch = await Poe2Trade.getItemByAttributes({
-      name,
-      rarity,
-      baseType,
-      explicit: topStats.map((s) => ({
-        id: s!.hash,
-        ...Poe2Trade.range(s!.value1),
-      })),
-      status: "securable",
-    }, itemLeague);
+    const topMatch = await Poe2Trade.getItemByAttributes(
+      {
+        name,
+        rarity,
+        baseType,
+        ...getItemSearchFilters(metadata),
+        explicit: topStats.map((s) => ({
+          id: s!.hash,
+          ...Poe2Trade.range(s!.value1),
+        })),
+        status: "securable",
+      },
+      itemLeague,
+    );
 
     return topMatch;
   }
@@ -127,7 +209,8 @@ class PriceEstimator {
     modifierSelection?: ModifierSelection,
   ) {
     const itemLeague = item.item?.league || league;
-    const { baseType, name, rarity } = getItemSearchMetadata(item);
+    const metadata = getItemSearchMetadata(item);
+    const { baseType, name, rarity } = metadata;
     if (!baseType) {
       throw new Error("Item data is incomplete: base type is missing.");
     }
@@ -141,6 +224,8 @@ class PriceEstimator {
       parsedMods.implicits || [],
       modifierSelection?.implicit,
     );
+    const includeItemLevel =
+      !isGemItem(item) && modifierSelection?.itemLevel === true;
     console.log("Estimating price for item in league:", league);
 
     const allPrices: ComparablePrice[] = [];
@@ -159,20 +244,24 @@ class PriceEstimator {
         i,
       );
 
-      const topMatch = await Poe2Trade.getItemByAttributes({
-        status: "securable",
-        name,
-        rarity,
-        baseType,
-        explicit: explicit.map((s) => ({
-          id: s!.hash,
-          ...Poe2Trade.range(s!.value1),
-        })),
-        implicit: implicit.map((s) => ({
-          id: s!.hash,
-          ...Poe2Trade.range(s!.value1),
-        })),
-      }, itemLeague);
+      const topMatch = await Poe2Trade.getItemByAttributes(
+        {
+          status: "securable",
+          name,
+          rarity,
+          baseType,
+          ...getItemSearchFilters(metadata, includeItemLevel),
+          explicit: explicit.map((s) => ({
+            id: s!.hash,
+            ...Poe2Trade.range(s!.value1),
+          })),
+          implicit: implicit.map((s) => ({
+            id: s!.hash,
+            ...Poe2Trade.range(s!.value1),
+          })),
+        },
+        itemLeague,
+      );
       //await wait(1000);
 
       // ignore your own listing
@@ -190,16 +279,20 @@ class PriceEstimator {
     if (!selectedExplicits.length) {
       // Items without explicit mods need a base-item lookup instead.
       console.log("fetching normal item", allPrices);
-      const normal = await Poe2Trade.getItemByAttributes({
-        name,
-        rarity,
-        baseType,
-        implicit: selectedImplicits.map((s) => ({
-          id: s!.hash,
-          ...Poe2Trade.range(s!.value1),
-        })),
-        status: "securable",
-      }, itemLeague);
+      const normal = await Poe2Trade.getItemByAttributes(
+        {
+          name,
+          rarity,
+          baseType,
+          ...getItemSearchFilters(metadata, includeItemLevel),
+          implicit: selectedImplicits.map((s) => ({
+            id: s!.hash,
+            ...Poe2Trade.range(s!.value1),
+          })),
+          status: "securable",
+        },
+        itemLeague,
+      );
       //await wait(1000);
       const filtered = (normal.result || []).filter((i) => i != item.id);
       const sampledItems = this.sampleRange(filtered, 10);
@@ -216,7 +309,7 @@ class PriceEstimator {
       allPrices.map((p) => p.currency),
       itemLeague,
     );
-    const estimate = {
+    const estimate: Estimate = {
       ...this.priceEstimate(allPrices),
       comparables: allPrices,
       search: {
@@ -224,6 +317,9 @@ class PriceEstimator {
         baseType,
         name,
         rarity,
+        ...(includeItemLevel && metadata.itemLevel !== undefined
+          ? { itemLevel: metadata.itemLevel }
+          : {}),
         explicitCount: selectedExplicits.length,
         implicitCount: selectedImplicits.length,
         explicitHashes: selectedExplicits.map((modifier) => modifier.hash),
@@ -233,16 +329,94 @@ class PriceEstimator {
 
     estimate.price = await this.upscalePrice(estimate.price, itemLeague);
     estimate.stdDev = await this.upscalePrice(estimate.stdDev, itemLeague);
+    estimate.matchesCurrentPrice = await this.matchesCurrentPrice(
+      item,
+      estimate.price,
+      itemLeague,
+    );
 
     console.log({ allPrices, estimate, item });
 
     this.cachePriceEstimate(item.item.id, estimate);
-    return estimate as Estimate;
+    return estimate;
     // perform some searches based off the explicits to see if we can find comparable items
     // but we also want to learn about which mods are valuable for rares
     // we can detect this by the general pattern of item_type, item_rarity, (mod1, mod2, ...modN) => price floor
     // we can also learn the max tiers by performing a search for item_type, mod descending. we should save these facts
     // unique items should be handled by searching for the exact item with the mods equal or greater
+  }
+
+  matchesModifierSelection(
+    item: Poe2Item,
+    estimate: Estimate,
+    modifierSelection?: ModifierSelection,
+  ) {
+    const expectedItemLevel = estimate.search?.itemLevel;
+    const selectedItemLevel =
+      modifierSelection?.itemLevel === true && !isGemItem(item)
+        ? item.item?.ilvl
+        : undefined;
+
+    if (expectedItemLevel !== selectedItemLevel) {
+      return false;
+    }
+
+    if (!modifierSelection) {
+      return true;
+    }
+
+    const expectedExplicitHashes = estimate.search?.explicitHashes;
+    const expectedImplicitHashes = estimate.search?.implicitHashes;
+    if (
+      !Array.isArray(expectedExplicitHashes) ||
+      !Array.isArray(expectedImplicitHashes)
+    ) {
+      return false;
+    }
+
+    const parsedMods = this.parseItemMods(item);
+    const selectedExplicitHashes = selectSelectedModifiers(
+      parsedMods.explicits || [],
+      modifierSelection.explicit,
+    ).map((modifier) => normalizeModifierHash(modifier.hash));
+    const selectedImplicitHashes = selectSelectedModifiers(
+      parsedMods.implicits || [],
+      modifierSelection.implicit,
+    ).map((modifier) => normalizeModifierHash(modifier.hash));
+
+    return (
+      selectedExplicitHashes.join("|") ===
+        expectedExplicitHashes.map(normalizeModifierHash).join("|") &&
+      selectedImplicitHashes.join("|") ===
+        expectedImplicitHashes.map(normalizeModifierHash).join("|")
+    );
+  }
+
+  async matchesCurrentPrice(
+    item: Poe2Item,
+    suggestedPrice: Price,
+    league?: string,
+  ) {
+    const listedPrice = item.listing?.price;
+    if (!listedPrice) {
+      return false;
+    }
+
+    try {
+      const rate = await this.exchangeRate(
+        suggestedPrice.currency,
+        listedPrice.currency,
+        league,
+      );
+      const listedAmountInSuggestedCurrency = listedPrice.amount * rate;
+      return (
+        roundCurrencyAmount(listedAmountInSuggestedCurrency) ===
+        suggestedPrice.amount
+      );
+    } catch (error) {
+      console.warn("Unable to compare suggested and listed prices", error);
+      return false;
+    }
   }
 
   async getSelectedSearchMods(
@@ -283,12 +457,10 @@ class PriceEstimator {
         .map((i) => i.listing.price.currency)
         .concat(fetchedItems.map((i) => i.listing.price.currency)),
     );
-    const priceCurrency = getComparablePriceCurrency(currency, currencies);
-
-    await this.fetchManyExchangeRates(priceCurrency, currencies, league);
+    await this.fetchManyExchangeRates(currency, currencies, league);
 
     const prices = this.toEquivalentPrices(
-      priceCurrency,
+      currency,
       fetchedItems.map((i) => ({
         amount: i.listing.price.amount,
         currency: i.listing.price.currency,
@@ -314,15 +486,105 @@ class PriceEstimator {
   }
 
   async upscalePrice(price: Price, league?: string) {
-    if (price.currency !== "exalted") {
-      return price;
+    try {
+      if (price.currency === "exalted") {
+        const chaosRate = await this.exchangeRate("exalted", "chaos", league);
+        const chaosAmount = price.amount / chaosRate;
+
+        if (chaosAmount >= 0.5) {
+          const chaosPrice: Price = {
+            amount: roundCurrencyAmount(chaosAmount),
+            currency: "chaos",
+            lowerPrice: { ...price },
+          };
+
+          try {
+            const divineRate = await this.exchangeRate(
+              "chaos",
+              "divine",
+              league,
+            );
+            const divineAmount = chaosAmount / divineRate;
+
+            if (divineAmount >= 0.5) {
+              return this.promoteDivineToMirror(
+                {
+                  amount: roundCurrencyAmount(divineAmount),
+                  currency: "divine",
+                  lowerPrice: chaosPrice,
+                },
+                league,
+              );
+            }
+          } catch (error) {
+            console.warn("Unable to promote price to divine", error);
+          }
+
+          return chaosPrice;
+        }
+      }
+
+      if (price.currency === "chaos") {
+        const divineRate = await this.exchangeRate("chaos", "divine", league);
+        const divineAmount = price.amount / divineRate;
+
+        if (divineAmount >= 0.5) {
+          return this.promoteDivineToMirror(
+            {
+              amount: roundCurrencyAmount(divineAmount),
+              currency: "divine",
+              lowerPrice: { ...price },
+            },
+            league,
+          );
+        }
+      }
+
+      if (price.currency === "divine") {
+        const chaosRate = await this.exchangeRate("chaos", "divine", league);
+        return this.promoteDivineToMirror(
+          {
+            ...price,
+            lowerPrice: {
+              amount: price.amount * chaosRate,
+              currency: "chaos",
+            },
+          },
+          league,
+        );
+      }
+
+      if (price.currency === "mirror") {
+        const divineRate = await this.exchangeRate("divine", "mirror", league);
+        return {
+          ...price,
+          lowerPrice: {
+            amount: price.amount * divineRate,
+            currency: "divine",
+          },
+        };
+      }
+    } catch (error) {
+      console.warn("Unable to promote suggested price currency", error);
     }
 
-    const divineRate = await this.exchangeRate("exalted", "divine", league);
-    if (price.amount > divineRate) {
-      // convert from exalted to divine if large enough
-      price.amount = price.amount / divineRate;
-      price.currency = "divine";
+    return price;
+  }
+
+  async promoteDivineToMirror(price: Price, league?: string) {
+    try {
+      const mirrorRate = await this.exchangeRate("divine", "mirror", league);
+      const mirrorAmount = price.amount / mirrorRate;
+
+      if (mirrorAmount >= 0.5) {
+        return {
+          amount: roundCurrencyAmount(mirrorAmount),
+          currency: "mirror",
+          lowerPrice: { ...price },
+        };
+      }
+    } catch (error) {
+      console.warn("Unable to promote suggested price to mirror", error);
     }
 
     return price;
@@ -337,7 +599,7 @@ class PriceEstimator {
   cachePriceEstimate(itemId: string, estimate: Estimate) {
     const cacheKey = `price_estimates`;
     const data = Cache.getJson<Record<string, Estimate>>(cacheKey) || {};
-    data[itemId] = estimate;
+    data[itemId] = { ...estimate, checkedAt: Date.now() };
     Cache.setJson(cacheKey, data, Cache.times.day);
   }
 
@@ -392,6 +654,58 @@ class PriceEstimator {
     Cache.setJson(cacheKey, cacheData, Cache.times.hour);
   }
 
+  async refreshExchangeRates(league?: string): Promise<CurrencyRates> {
+    const rates: CurrencyRates = {};
+    let overview;
+
+    try {
+      overview = await Poe2Trade.client.getCurrencyExchangeOverview(league);
+    } catch (error) {
+      console.warn("Unable to refresh currency rates", error);
+      return rates;
+    }
+
+    for (const iWant of CURRENCY_IDS) {
+      for (const iHave of CURRENCY_IDS) {
+        if (iWant === iHave) {
+          await this.cacheExchangeRates(iWant, iHave, 1, league);
+          rates[`${iWant}:${iHave}`] = 1;
+          continue;
+        }
+
+        const rate = getCurrencyRateFromOverview(overview, iWant, iHave);
+        if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
+          await this.cacheExchangeRates(iWant, iHave, rate, league);
+          rates[`${iWant}:${iHave}`] = rate;
+        }
+      }
+    }
+
+    if (!rates["divine:mirror"]) {
+      try {
+        const mirrorRate = await this.exchangeRate(
+          "divine",
+          "mirror",
+          league,
+          true,
+        );
+        rates["divine:mirror"] = mirrorRate;
+        rates["mirror:divine"] = 1 / mirrorRate;
+        await this.cacheExchangeRates("divine", "mirror", mirrorRate, league);
+        await this.cacheExchangeRates(
+          "mirror",
+          "divine",
+          1 / mirrorRate,
+          league,
+        );
+      } catch (error) {
+        console.warn("Unable to refresh divine to mirror rate", error);
+      }
+    }
+
+    return rates;
+  }
+
   toEquivalentPrices(iWant: string, prices: Price[], league?: string) {
     return prices.map((p) => ({
       amount: this.equivalentPrice(iWant, p, league),
@@ -437,10 +751,20 @@ class PriceEstimator {
     return (rate1 + rate2) / 2;
   }
 
-  async exchangeRate(iWant: string, iHave: string, league?: string) {
+  async exchangeRate(
+    iWant: string,
+    iHave: string,
+    league?: string,
+    forceRefresh = false,
+  ) {
     const cached = this.getCachedExchangeRates(iWant, iHave, league);
 
-    if (typeof cached === "number" && Number.isFinite(cached) && cached > 0) {
+    if (
+      !forceRefresh &&
+      typeof cached === "number" &&
+      Number.isFinite(cached) &&
+      cached > 0
+    ) {
       return cached;
     }
 
@@ -450,9 +774,8 @@ class PriceEstimator {
     }
 
     try {
-      const overview = await Poe2Trade.client.getCurrencyExchangeOverview(
-        league,
-      );
+      const overview =
+        await Poe2Trade.client.getCurrencyExchangeOverview(league);
       const rate = getCurrencyRateFromOverview(overview, iWant, iHave);
 
       if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
@@ -460,7 +783,20 @@ class PriceEstimator {
         return rate;
       }
     } catch (error) {
-      console.warn("Currency overview unavailable, using trade exchange", error);
+      console.warn(
+        "Currency overview unavailable, using trade exchange",
+        error,
+      );
+    }
+
+    if (
+      (iWant === "divine" && iHave === "mirror") ||
+      (iWant === "mirror" && iHave === "divine")
+    ) {
+      const divinePerMirror = await Poe2Trade.client.getMirrorRate(league);
+      const rate = iWant === "divine" ? divinePerMirror : 1 / divinePerMirror;
+      await this.cacheExchangeRates(iWant, iHave, rate, league);
+      return rate;
     }
 
     const swaps = await Poe2Trade.client.getCurrencySwaps(iWant, iHave, league);
@@ -617,12 +953,15 @@ class PriceEstimator {
                 parsed: mod.description,
                 value1: values?.[0],
                 value2: values?.[1],
-                hash: normalizeStatHash(mod.hash),
+                hash: normalizeModifierHash(mod.hash),
               },
             ];
           }
 
-          console.warn("Skipping modifier that is not in the local stat table", mod);
+          console.warn(
+            "Skipping modifier that is not in the local stat table",
+            mod,
+          );
           return [];
         }
       });

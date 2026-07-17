@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { HashRouter as Router, Route, Routes } from "react-router-dom";
 import MainPage from "./components/MainPage";
 import MessagesPage from "./components/MessagesPage";
+import CurrencyRatesPage from "./components/CurrencyRatesPage";
 import { SideMenu } from "./components/SideMenu";
 import { AppContextProvider } from "./contexts/AppContext";
 import "./App.css";
@@ -38,6 +39,7 @@ const AppContent: React.FC = () => {
         <Routes>
           <Route path="/" element={<MainPage />} />
           <Route path="/messages" element={<MessagesPage />} />
+          <Route path="/currency-rates" element={<CurrencyRatesPage />} />
         </Routes>
       </div>
     </div>

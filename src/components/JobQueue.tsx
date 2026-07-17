@@ -36,6 +36,11 @@ export async function handleJob<T>(
     await task;
   } catch (error: any) {
     console.error("Error price checking items:", error);
+    if (job.status === "cancelled") {
+      setErrorMessage("");
+      return;
+    }
+
     if (typeof error === "object" && "message" in error) {
       setErrorMessage(error.message);
     } else {

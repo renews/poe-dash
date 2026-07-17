@@ -1,5 +1,5 @@
 import React from "react";
-import { X, Home, MessageSquare } from "lucide-react";
+import { X, Home, MessageSquare, Coins } from "lucide-react";
 import { Link } from "react-router-dom";
 
 interface SideMenuProps {
@@ -43,6 +43,14 @@ export const SideMenu: React.FC<SideMenuProps> = ({ isOpen, onClose }) => {
         >
           <MessageSquare className="h-5 w-5 mr-3" />
           <span>Messages</span>
+        </Link>
+        <Link
+          to="/currency-rates"
+          className="flex items-center px-6 py-3 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+          onClick={handleLinkClick}
+        >
+          <Coins className="h-5 w-5 mr-3" />
+          <span>Currency Rates</span>
         </Link>
         {/*
          *<Link
