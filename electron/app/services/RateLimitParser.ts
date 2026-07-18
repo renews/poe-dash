@@ -15,6 +15,14 @@ interface RateLimitRule {
   ts: number;
 }
 
+type RateLimitHeaderValue = string | string[] | number | undefined;
+type RateLimitHeaders = Record<string, RateLimitHeaderValue>;
+
+interface RateLimitParserOptions {
+  sleep?: (milliseconds: number) => Promise<void>;
+  now?: () => number;
+}
+
 /**
  * Parses a header value containing one or more segments of the form "value:window:reset"
  * into an array of RateLimitDetail objects.
@@ -38,13 +46,15 @@ function parseRateLimitSegments(headerValue: string): RateLimitDetail[] {
  * Optionally, a header "x-rate-limit-rules" can provide a comma-separated list of rule names.
  */
 export function parseRateLimitHeaders(
-  headers: Record<string, any>,
+  headers: RateLimitHeaders,
 ): RateLimitRule[] {
   // Normalize header keys to lowercase for consistency.
-  const lowerCaseHeaders = Object.keys(headers).reduce((acc: any, key) => {
-    acc[key.toLowerCase()] = headers[key];
-    return acc;
-  }, {});
+  const lowerCaseHeaders = Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key.toLowerCase(),
+      Array.isArray(value) ? value.join(",") : String(value ?? ""),
+    ]),
+  );
 
   const policy = lowerCaseHeaders["x-rate-limit-policy"];
 
@@ -84,7 +94,10 @@ export function parseRateLimitHeaders(
       : [];
 
     for (let i = 0; i < limits.length; i++) {
-      limits[i].used = state[i].limit;
+      limits[i].used = state[i]?.limit;
+      if (state[i]?.reset) {
+        limits[i].reset = state[i].reset;
+      }
     }
 
     const ts = Date.now();
@@ -96,8 +109,19 @@ export function parseRateLimitHeaders(
 
 export class RateLimitParser {
   rules: RateLimitRule[] = [];
+  private waitTail: Promise<void> = Promise.resolve();
+  private blockedUntil = 0;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly now: () => number;
 
-  parse(headers: Record<string, any>) {
+  constructor(options: RateLimitParserOptions = {}) {
+    this.sleep =
+      options.sleep ||
+      ((milliseconds) => wait(milliseconds).then(() => undefined));
+    this.now = options.now || Date.now;
+  }
+
+  parse(headers: RateLimitHeaders) {
     const parsed = parseRateLimitHeaders(headers);
     this.clearOldRules();
 
@@ -118,13 +142,15 @@ export class RateLimitParser {
   }
 
   clearOldRules() {
-    /*
-     *const now = Date.now();
-     *for (let i = 0; i < this.rules.length; i++) {
-     *  const rule = this.rules[i];
-     *  rule.limits = rule.limits.filter((l) => rule.ts + l.reset * 1000 > now);
-     *}
-     */
+    const now = this.now();
+    this.rules = this.rules
+      .map((rule) => ({
+        ...rule,
+        limits: rule.limits.filter(
+          (limit) => rule.ts + limit.window * 1000 > now,
+        ),
+      }))
+      .filter((rule) => rule.limits.length > 0);
   }
 
   getWaitTimes() {
@@ -132,27 +158,42 @@ export class RateLimitParser {
     this.clearOldRules();
 
     const limits = this.rules.flatMap((r) => r.limits);
-    console.log(limits);
     for (const limit of limits) {
       const used = limit.used || 0;
-      const power = Math.sqrt(limit.limit);
-      const waitTime =
-        (used ** power / limit.limit ** power) * limit.window * 1000;
-      waitTimes.push(waitTime);
+      if (used >= limit.limit - 1) {
+        waitTimes.push(Math.max(limit.reset, 1) * 1000);
+      } else if (used > 0 && limit.limit > 0) {
+        waitTimes.push((limit.window * 1000) / limit.limit);
+      }
     }
 
-    console.log({ waitTimes });
     return waitTimes;
   }
 
   getWaitTime(minTime = 0) {
-    return Math.max(...this.getWaitTimes(), minTime);
+    return Math.max(
+      ...this.getWaitTimes(),
+      this.blockedUntil - this.now(),
+      minTime,
+    );
   }
 
-  async waitForLimit(minTime = 0) {
-    const waitTime = this.getWaitTime(minTime);
-    console.log(`Waiting for ${waitTime}ms`);
-    await wait(waitTime);
+  blockFor(milliseconds: number) {
+    this.blockedUntil = Math.max(
+      this.blockedUntil,
+      this.now() + Math.max(0, milliseconds),
+    );
+  }
+
+  waitForLimit(minTime = 0) {
+    const scheduledWait = this.waitTail.then(async () => {
+      const waitTime = this.getWaitTime(minTime);
+      if (waitTime > 0) {
+        await this.sleep(waitTime);
+      }
+    });
+    this.waitTail = scheduledWait.catch(() => undefined);
+    return scheduledWait;
   }
 }
 

@@ -13,6 +13,11 @@ import { promisify } from "node:util";
 import { isAllowedExternalUrl } from "../src/services/externalLinks";
 import { merchantHistoryService } from "./app/services/MerchantHistoryService";
 import { getRendererUrl } from "./app/renderer";
+import {
+  getAllowedRendererOrigins,
+  isAllowedRendererOrigin,
+  LOCAL_SERVER_HOST,
+} from "./app/proxySecurity";
 
 const PORT = process.env.PORT || 7555;
 const execFileAsync = promisify(execFile);
@@ -36,6 +41,10 @@ process.env.APP_ROOT = path.join(__dirname, "..");
 export const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
 export const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
+const allowedRendererOrigins = getAllowedRendererOrigins(
+  PORT,
+  VITE_DEV_SERVER_URL,
+);
 
 nativeTheme.themeSource = "dark";
 
@@ -136,7 +145,21 @@ if (hasSingleInstanceLock) {
   });
 }
 
-expressApp.use(cors());
+expressApp.use((req, res, next) => {
+  const origin = req.get("origin");
+  if (!isAllowedRendererOrigin(origin, allowedRendererOrigins)) {
+    res.status(403).send("Blocked origin");
+    return;
+  }
+  next();
+});
+expressApp.use(
+  cors({
+    origin(origin, callback) {
+      callback(null, isAllowedRendererOrigin(origin, allowedRendererOrigins));
+    },
+  }),
+);
 expressApp.use("/proxy", routes.proxy);
 expressApp.use(express.json());
 expressApp.use("/chat", routes.chatRouter);
@@ -160,9 +183,19 @@ ipcMain.handle("poe-fetch-history", (_event, league: unknown) =>
 );
 
 wss.on("connection", (ws, request) => {
+  if (
+    !isAllowedRendererOrigin(
+      request.headers.origin,
+      allowedRendererOrigins,
+    )
+  ) {
+    ws.close(1008, "Blocked origin");
+    return;
+  }
+
   console.log(request.url);
   if (request.url?.startsWith("/chat")) {
-    routes.wsChat(ws, request as Request);
+    routes.wsChat(ws);
     return;
   }
   if (request?.url?.startsWith("/proxy")) {
@@ -173,7 +206,7 @@ wss.on("connection", (ws, request) => {
 
 if (hasSingleInstanceLock) {
   app.whenReady().then(createWindow);
-  server.listen(PORT, () => {
+  server.listen(Number(PORT), LOCAL_SERVER_HOST, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
   });
 } else {

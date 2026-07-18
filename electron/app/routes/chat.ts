@@ -1,4 +1,4 @@
-import { Router, Request } from "express";
+import { Router } from "express";
 import fs from "fs";
 import path from "path";
 
@@ -17,11 +17,15 @@ let messages = parseMessages(chatFileContent);
 let wss: WebSocket;
 let chatFileWatcher: FSWatcher | undefined;
 
+interface ChatConfig {
+  chatPath?: string;
+}
+
 if (config && chatFileContent) {
   setupChatFileWatcher();
 }
 
-function loadConfig() {
+function loadConfig(): ChatConfig {
   const sourcePath = fs.existsSync(configPath)
     ? configPath
     : legacyConfigPath;
@@ -30,7 +34,13 @@ function loadConfig() {
     return {};
   }
 
-  const loadedConfig = JSON.parse(fs.readFileSync(sourcePath).toString());
+  let loadedConfig: ChatConfig;
+  try {
+    loadedConfig = JSON.parse(fs.readFileSync(sourcePath).toString()) as ChatConfig;
+  } catch (error) {
+    console.error("Unable to read chat configuration:", error);
+    return {};
+  }
   if (sourcePath === legacyConfigPath && !fs.existsSync(configPath)) {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(loadedConfig, null, 2));
@@ -39,7 +49,7 @@ function loadConfig() {
   return loadedConfig;
 }
 
-function updateConfig(newConfig: Record<string, any>) {
+function updateConfig(newConfig: Partial<ChatConfig>) {
   const config = loadConfig();
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(
@@ -97,7 +107,7 @@ export function parseMessages(content: string) {
     const match = offerRegex.exec(line);
     if (match) {
       const [
-        _,
+        ,
         timestamp,
         characterName,
         itemName,
@@ -126,7 +136,7 @@ export function parseMessages(content: string) {
   return messages;
 }
 
-export function wsChat(ws: WebSocket, _req: Request) {
+export function wsChat(ws: WebSocket) {
   console.log("forwarding chat messages to client");
   wss = ws;
 }
