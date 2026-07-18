@@ -10,8 +10,10 @@ import React, {
 import { Poe2Trade } from "../services/poe2trade";
 import {
   CURRENCY_RATE_REFRESH_INTERVAL_MS,
+  DEFAULT_MODIFIER_RANGE_PERCENT,
   DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES,
   CurrencyRates,
+  normalizeModifierRangePercent,
   PriceChecker,
   Estimate,
 } from "../services/PriceEstimator";
@@ -27,6 +29,24 @@ import { handleJob } from "../components/JobQueue";
 import { Leagues, League } from "../data/leagues";
 
 export const MODIFIER_SELECTIONS_STORAGE_KEY = "modifierSelections";
+export const SELECTED_LEAGUE_STORAGE_KEY = "selectedLeague";
+export const MODIFIER_RANGE_PERCENT_STORAGE_KEY = "modifierRangePercent";
+
+export function parseSavedLeague(value: string | null): League {
+  return Leagues.includes(value as League) ? (value as League) : Leagues[0];
+}
+
+export function parseSavedModifierRange(value: string | null) {
+  if (!value?.trim()) {
+    return DEFAULT_MODIFIER_RANGE_PERCENT;
+  }
+
+  return normalizeModifierRangePercent(Number(value));
+}
+
+export function parseSavedAccountName(value: string | null) {
+  return value?.trim() || "";
+}
 
 function isBooleanArray(value: unknown): value is boolean[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "boolean");
@@ -109,9 +129,12 @@ interface AppContextType {
   isLiveMonitoring: boolean;
   setIsLiveMonitoring: Dispatch<SetStateAction<boolean>>;
   isPriceChecking: boolean;
+  isSyncing: boolean;
   priceCheckProgress: string;
   priceCheckCooldownMinutes: number;
   setPriceCheckCooldownMinutes: Dispatch<SetStateAction<number>>;
+  modifierRangePercent: number;
+  setModifierRangePercent: Dispatch<SetStateAction<number>>;
   currencyRates: CurrencyRates;
   currencyRatesUpdatedAt: number | null;
   isRefreshingCurrencyRates: boolean;
@@ -144,6 +167,32 @@ function getSavedPriceCheckCooldown() {
     : DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES;
 }
 
+function getSavedModifierRange() {
+  if (typeof localStorage === "undefined") {
+    return DEFAULT_MODIFIER_RANGE_PERCENT;
+  }
+
+  return parseSavedModifierRange(
+    localStorage.getItem(MODIFIER_RANGE_PERCENT_STORAGE_KEY),
+  );
+}
+
+function getSavedAccountName() {
+  if (typeof localStorage === "undefined") {
+    return "";
+  }
+
+  return parseSavedAccountName(localStorage.getItem("accountName"));
+}
+
+function getSavedLeague() {
+  if (typeof localStorage === "undefined") {
+    return Leagues[0];
+  }
+
+  return parseSavedLeague(localStorage.getItem(SELECTED_LEAGUE_STORAGE_KEY));
+}
+
 export const useAppContext = () => {
   const context = useContext(AppContext);
   if (!context) {
@@ -155,8 +204,8 @@ export const useAppContext = () => {
 export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  const [accountName, setAccountName] = useState("");
-  const [selectedLeague, setSelectedLeague] = useState<League>(Leagues[0]);
+  const [accountName, setAccountName] = useState(getSavedAccountName);
+  const [selectedLeague, setSelectedLeague] = useState<League>(getSavedLeague);
   const [items, setItems] = useState<Poe2Item[]>([]);
   const [liveSearchItems, setLiveSearchItems] = useState<Poe2Item[]>([]);
   const [stashTabs, setStashTabs] = useState<string[]>([]);
@@ -164,9 +213,13 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   const [searchTerm, setSearchTerm] = useState<string>("");
   const [isLiveMonitoring, setIsLiveMonitoring] = useState<boolean>(false);
   const [isPriceChecking, setIsPriceChecking] = useState<boolean>(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [priceCheckProgress, setPriceCheckProgress] = useState("");
   const [priceCheckCooldownMinutes, setPriceCheckCooldownMinutes] = useState(
     getSavedPriceCheckCooldown,
+  );
+  const [modifierRangePercent, setModifierRangePercent] = useState(
+    getSavedModifierRange,
   );
   const [priceEstimates, setPriceEstimates] = useState<
     Record<string, Estimate>
@@ -216,6 +269,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       selectedLeague,
       modifierSelections,
       priceCheckCooldownMinutes,
+      modifierRangePercent,
     );
 
     priceCheck.onCancel = async () => {
@@ -242,6 +296,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const getItems = async (name: string) => {
+    setIsSyncing(true);
     setErrorMessage("");
 
     const sync = new SyncAccount(name, selectedLeague);
@@ -253,13 +308,17 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       updateStashTabs(items);
     };
 
-    await handleJob(sync, setJobs, setErrorMessage);
+    try {
+      await handleJob(sync, setJobs, setErrorMessage);
 
-    const accountItems = await Poe2Trade.getAllCachedAccountItems(name);
-    setItems(accountItems);
-    updateStashTabs(accountItems);
-    if (accountItems.length) {
-      await priceCheckItems(accountItems);
+      const accountItems = await Poe2Trade.getAllCachedAccountItems(name);
+      setItems(accountItems);
+      updateStashTabs(accountItems);
+      if (accountItems.length) {
+        await priceCheckItems(accountItems);
+      }
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -285,6 +344,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       item,
       selectedLeague,
       selection,
+      modifierRangePercent,
     );
     setPriceEstimates(PriceChecker.getCachedEstimates());
     console.log(price);
@@ -339,13 +399,6 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   }, [accountName]);
 
   useEffect(() => {
-    const savedAccountName = localStorage.getItem("accountName");
-    if (savedAccountName) {
-      setAccountName(savedAccountName);
-    }
-  }, []);
-
-  useEffect(() => {
     void refreshCurrencyRates();
     const interval = window.setInterval(
       () => void refreshCurrencyRates(),
@@ -361,6 +414,17 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       priceCheckCooldownMinutes.toString(),
     );
   }, [priceCheckCooldownMinutes]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      MODIFIER_RANGE_PERCENT_STORAGE_KEY,
+      modifierRangePercent.toString(),
+    );
+  }, [modifierRangePercent]);
+
+  useEffect(() => {
+    localStorage.setItem(SELECTED_LEAGUE_STORAGE_KEY, selectedLeague);
+  }, [selectedLeague]);
 
   useEffect(() => {
     persistModifierSelections(modifierSelections);
@@ -387,9 +451,12 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     isLiveMonitoring,
     setIsLiveMonitoring,
     isPriceChecking,
+    isSyncing,
     priceCheckProgress,
     priceCheckCooldownMinutes,
     setPriceCheckCooldownMinutes,
+    modifierRangePercent,
+    setModifierRangePercent,
     currencyRates,
     currencyRatesUpdatedAt,
     isRefreshingCurrencyRates,

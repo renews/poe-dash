@@ -4,14 +4,15 @@ import { PoeListItem } from "./PoeListItem";
 import { LiveMonitorButton } from "./LiveMonitorButton";
 import LiveMonitor from "./LiveMonitor";
 import { JobQueue } from "./JobQueue";
-import { Leagues, League } from "../data/leagues";
+import {
+  formFieldClassName,
+  successButtonClassName,
+} from "./formStyles";
 
 const MainPage: React.FC = () => {
   const {
     accountName,
-    setAccountName,
     selectedLeague,
-    setSelectedLeague,
     items,
     setItems,
     liveSearchItems,
@@ -24,8 +25,6 @@ const MainPage: React.FC = () => {
     setIsLiveMonitoring,
     isPriceChecking,
     priceCheckProgress,
-    priceCheckCooldownMinutes,
-    setPriceCheckCooldownMinutes,
     priceEstimates,
     modifierSelections,
     setModifierSelection,
@@ -33,53 +32,22 @@ const MainPage: React.FC = () => {
     setErrorMessage,
     jobs,
     setJobs,
-    getItems,
     filterByStash,
     priceCheckItem,
+    modifierRangePercent,
     refreshItem,
     refreshAllItems,
     priceCheckAllItems,
     filteredItems,
   } = useAppContext();
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    localStorage.setItem("accountName", accountName);
-    getItems(accountName);
-  };
-
   const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(e.target.value);
   };
 
   return (
-    <div className="container mx-auto p-4">
+    <div className="w-full p-4 pt-16">
       <h1 className="text-2xl font-bold mb-4 mt-8">Welcome to Poe2Stash</h1>
-      <form onSubmit={handleSubmit} className="mb-4">
-        <div className="flex gap-2 items-center">
-          <input
-            type="text"
-            value={accountName}
-            onChange={(e) => setAccountName(e.target.value)}
-            placeholder="Enter your account name"
-            className="border p-2"
-          />
-          <select
-            value={selectedLeague}
-            onChange={(e) => setSelectedLeague(e.target.value as League)}
-            className="border p-2"
-          >
-            {Leagues.map((league) => (
-              <option key={league} value={league}>
-                {league}
-              </option>
-            ))}
-          </select>
-          <button type="submit" className="bg-blue-500 text-white p-2 rounded">
-            Submit
-          </button>
-        </div>
-      </form>
 
       {items.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-4">
@@ -87,7 +55,7 @@ const MainPage: React.FC = () => {
             Filter by Stash Tab:
           </label>
           <select
-            className="border p-2"
+            className={`${formFieldClassName} min-w-48`}
             id="stash-select"
             value={selectedStash}
             onChange={(e) => filterByStash(e.target.value)}
@@ -103,11 +71,11 @@ const MainPage: React.FC = () => {
             value={searchTerm}
             onChange={handleSearch}
             placeholder="Search items..."
-            className="border p-2"
+            className={`${formFieldClassName} min-w-48`}
           />
           <button
             onClick={refreshAllItems}
-            className="bg-green-500 text-white p-2 rounded disabled:bg-gray-400"
+            className={successButtonClassName}
           >
             Refresh All
           </button>
@@ -115,27 +83,10 @@ const MainPage: React.FC = () => {
           <button
             onClick={priceCheckAllItems}
             disabled={isPriceChecking}
-            className="bg-green-500 text-white p-2 rounded disabled:bg-gray-400"
+            className={successButtonClassName}
           >
             {isPriceChecking ? "Checking Prices..." : "Price Check All"}
           </button>
-          <label className="flex items-center gap-2 text-sm text-gray-300">
-            Recheck after
-            <input
-              type="number"
-              min="0"
-              step="1"
-              value={priceCheckCooldownMinutes}
-              onChange={(event) =>
-                setPriceCheckCooldownMinutes(
-                  Math.max(0, Number(event.target.value) || 0),
-                )
-              }
-              className="w-16 border p-1 text-gray-900"
-              title="Minutes to reuse a recent whole-tab price check. Set to 0 to always recheck."
-            />
-            min
-          </label>
           <LiveMonitorButton
             accountName={accountName}
             league={selectedLeague}
@@ -185,6 +136,7 @@ const MainPage: React.FC = () => {
           item={item}
           league={selectedLeague}
           onPriceClick={priceCheckItem}
+          modifierRangePercent={modifierRangePercent}
           onRefreshClick={refreshItem}
           modifierSelection={modifierSelections[item.id]}
           onModifierSelectionChange={(selection) =>

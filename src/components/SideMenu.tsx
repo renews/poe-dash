@@ -1,5 +1,12 @@
 import React from "react";
-import { X, Home, MessageSquare, Coins } from "lucide-react";
+import {
+  X,
+  Home,
+  MessageSquare,
+  Coins,
+  Settings,
+  History as HistoryIcon,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 
 interface SideMenuProps {
@@ -52,16 +59,22 @@ export const SideMenu: React.FC<SideMenuProps> = ({ isOpen, onClose }) => {
           <Coins className="h-5 w-5 mr-3" />
           <span>Currency Rates</span>
         </Link>
-        {/*
-         *<Link
-         *  to="/settings"
-         *  className="flex items-center px-6 py-3 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
-         *  onClick={handleLinkClick}
-         *>
-         *  <Settings className="h-5 w-5 mr-3" />
-         *  <span>Settings</span>
-         *</Link>
-         */}
+        <Link
+          to="/sale-history"
+          className="flex items-center px-6 py-3 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+          onClick={handleLinkClick}
+        >
+          <HistoryIcon className="h-5 w-5 mr-3" />
+          <span>Sale History</span>
+        </Link>
+        <Link
+          to="/configuration"
+          className="flex items-center px-6 py-3 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+          onClick={handleLinkClick}
+        >
+          <Settings className="h-5 w-5 mr-3" />
+          <span>Configuration</span>
+        </Link>
       </nav>
       <div className="p-4 bg-gray-700 text-gray-400 text-sm">
         © 2023 Poe2Stash

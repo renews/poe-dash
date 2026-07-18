@@ -11,6 +11,8 @@ import http from "http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isAllowedExternalUrl } from "../src/services/externalLinks";
+import { merchantHistoryService } from "./app/services/MerchantHistoryService";
+import { getRendererUrl } from "./app/renderer";
 
 const PORT = process.env.PORT || 7555;
 const execFileAsync = promisify(execFile);
@@ -42,6 +44,8 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
   : RENDERER_DIST;
 
 let win: BrowserWindow | null;
+let focusPending = false;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 async function openExternalUrl(url: string) {
   if (process.platform === "linux") {
@@ -59,6 +63,11 @@ function createWindow() {
       preload: path.join(__dirname, "preload.mjs"),
     },
   });
+
+  if (focusPending) {
+    focusPending = false;
+    focusMainWindow();
+  }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) {
@@ -82,10 +91,23 @@ function createWindow() {
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL);
   } else {
-    // win.loadFile('dist/index.html')
     console.log("RENDERER_DIST", { RENDERER_DIST });
-    win.loadFile(path.join(RENDERER_DIST, "index.html"));
+    void win.loadURL(getRendererUrl(PORT));
   }
+}
+
+function focusMainWindow() {
+  const mainWindow = win ?? BrowserWindow.getAllWindows()[0];
+  if (!mainWindow) {
+    return false;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+  return true;
 }
 
 // Quit when all windows are closed, except on macOS. There, it's common
@@ -106,12 +128,19 @@ app.on("activate", () => {
   }
 });
 
-app.whenReady().then(createWindow);
+if (hasSingleInstanceLock) {
+  app.on("second-instance", () => {
+    if (!focusMainWindow()) {
+      focusPending = true;
+    }
+  });
+}
 
 expressApp.use(cors());
 expressApp.use("/proxy", routes.proxy);
 expressApp.use(express.json());
 expressApp.use("/chat", routes.chatRouter);
+expressApp.use(express.static(RENDERER_DIST));
 
 const server = http.createServer(expressApp);
 const wss = new WebSocketServer({ server });
@@ -123,6 +152,12 @@ ipcMain.handle("open-external-url", async (_event, url: unknown) => {
 
   await openExternalUrl(url);
 });
+
+ipcMain.handle("poe-get-session", () => merchantHistoryService.getSession());
+ipcMain.handle("poe-login", () => merchantHistoryService.login());
+ipcMain.handle("poe-fetch-history", (_event, league: unknown) =>
+  merchantHistoryService.fetchHistory(typeof league === "string" ? league : ""),
+);
 
 wss.on("connection", (ws, request) => {
   console.log(request.url);
@@ -136,6 +171,11 @@ wss.on("connection", (ws, request) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+if (hasSingleInstanceLock) {
+  app.whenReady().then(createWindow);
+  server.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+  });
+} else {
+  app.quit();
+}

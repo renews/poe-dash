@@ -6,9 +6,15 @@ import { Poe2Trade } from "../services/poe2trade";
 import { Poe2Item, ChatOffer } from "../services/types";
 import { useAppContext } from "../contexts/AppContext";
 import { JobQueue } from "./JobQueue";
+import {
+  formFieldClassName,
+  primaryButtonClassName,
+} from "./formStyles";
 
 const MessagesPage: React.FC = () => {
-  const [file, setFile] = useState<File | null>(null);
+  const [chatFilePath, setChatFilePath] = useState(
+    () => chatService.getSavedChatFilePath() || "",
+  );
   const [offers, setOffers] = useState<ChatOffer[]>([]);
   const [accountItems, setAccountItems] = useState<Poe2Item[]>([]);
   const [messageSearchTerm, setMessageSearchTerm] = useState("");
@@ -16,6 +22,7 @@ const MessagesPage: React.FC = () => {
 
   const {
     priceCheckItem,
+    modifierRangePercent,
     selectedLeague,
     refreshItem,
     priceEstimates,
@@ -46,9 +53,26 @@ const MessagesPage: React.FC = () => {
   };
 
   useEffect(() => {
-    setupWebSocket();
-    fetchOffers();
-    fetchAccountItems();
+    const initialize = async () => {
+      const savedPath = chatService.getSavedChatFilePath();
+      if (savedPath) {
+        try {
+          await chatService.setChatFilePath(savedPath);
+        } catch (error) {
+          chatService.clearSavedChatFilePath();
+          setChatFilePath("");
+          setErrorMessage(
+            "Error restoring chat file: " + (error as Error).message,
+          );
+        }
+      }
+
+      setupWebSocket();
+      await fetchOffers();
+      await fetchAccountItems();
+    };
+
+    void initialize();
 
     return () => {
       if (wsRef) {
@@ -57,20 +81,14 @@ const MessagesPage: React.FC = () => {
     };
   }, []); // Empty dependency array to run only on mount and unmount
 
-  useEffect(() => {
-    if (file) {
-      setupWebSocket();
-    }
-  }, [file]);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) {
+    if (!chatFilePath) {
       console.error("No file selected");
       return;
     }
     try {
-      await chatService.setChatFilePath(file.path);
+      await chatService.setChatFilePath(chatFilePath);
       await fetchOffers();
       setupWebSocket(); // Reconnect WebSocket after setting new chat file
     } catch (error) {
@@ -142,23 +160,27 @@ const MessagesPage: React.FC = () => {
   };
 
   return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">Messages</h1>
+    <div className="w-full p-4 pt-16">
+      <h1 className="text-2xl font-bold mb-4">Chat Monitor</h1>
       <form onSubmit={handleSubmit} className="mb-4">
         <input
           type="file"
-          onChange={(e) => setFile(e.target.files ? e.target.files[0] : null)}
+          onChange={(e) =>
+            setChatFilePath(e.target.files?.[0]?.path || "")
+          }
           accept=".txt,.log,.json"
-          className="border p-2 mr-2 file:mr-4 file:py-2 file:px-4
-          file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+          className={`${formFieldClassName} mr-2 file:mr-4 file:rounded-md file:border-0 file:bg-blue-500 file:px-3 file:py-1 file:font-semibold file:text-white hover:file:bg-blue-600`}
         />
         <button
           type="submit"
-          className="bg-blue-500 text-white p-2 rounded hover:bg-blue-600"
+          className={primaryButtonClassName}
         >
           Load Messages
         </button>
       </form>
+      {chatFilePath && (
+        <p className="text-sm text-gray-400 mb-4">Log file: {chatFilePath}</p>
+      )}
 
       <div className="flex items-center mb-4">
         <input
@@ -166,7 +188,7 @@ const MessagesPage: React.FC = () => {
           value={messageSearchTerm}
           onChange={handleMessageSearch}
           placeholder="Search messages..."
-          className="border p-2 flex-grow mr-2 rounded"
+          className={`${formFieldClassName} mr-2 flex-grow`}
         />
         <div className="flex items-center">
           <label htmlFor="activeOnly" className="mr-2">
@@ -208,6 +230,7 @@ const MessagesPage: React.FC = () => {
                 league={selectedLeague}
                 key={o.found.id}
                 onPriceClick={priceCheckItem}
+                modifierRangePercent={modifierRangePercent}
                 onRefreshClick={refreshItem}
                 modifierSelection={modifierSelections[o.found.id]}
                 onModifierSelectionChange={(selection) =>

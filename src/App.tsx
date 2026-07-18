@@ -1,14 +1,24 @@
 import React, { useState } from "react";
-import { HashRouter as Router, Route, Routes } from "react-router-dom";
+import {
+  HashRouter as Router,
+  Navigate,
+  Route,
+  Routes,
+} from "react-router-dom";
 import MainPage from "./components/MainPage";
 import MessagesPage from "./components/MessagesPage";
 import CurrencyRatesPage from "./components/CurrencyRatesPage";
+import ConfigurationPage from "./components/ConfigurationPage";
+import SaleHistoryPage from "./components/SaleHistoryPage";
 import { SideMenu } from "./components/SideMenu";
 import { AppContextProvider } from "./contexts/AppContext";
+import { useAppContext } from "./contexts/AppContext";
+import { shouldOpenConfiguration } from "./appNavigation";
 import "./App.css";
 
 const AppContent: React.FC = () => {
   const [isSideMenuOpen, setIsSideMenuOpen] = useState(false);
+  const { accountName } = useAppContext();
 
   return (
     <div className="relative flex h-screen">
@@ -37,9 +47,20 @@ const AppContent: React.FC = () => {
           </svg>
         </button>
         <Routes>
-          <Route path="/" element={<MainPage />} />
+          <Route
+            path="/"
+            element={
+              shouldOpenConfiguration("/", accountName) ? (
+                <Navigate to="/configuration" replace />
+              ) : (
+                <MainPage />
+              )
+            }
+          />
           <Route path="/messages" element={<MessagesPage />} />
           <Route path="/currency-rates" element={<CurrencyRatesPage />} />
+          <Route path="/configuration" element={<ConfigurationPage />} />
+          <Route path="/sale-history" element={<SaleHistoryPage />} />
         </Routes>
       </div>
     </div>

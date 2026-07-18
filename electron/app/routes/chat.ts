@@ -3,29 +3,45 @@ import fs from "fs";
 import path from "path";
 
 import { WebSocket } from "ws";
-import chokidar from "chokidar";
+import chokidar, { FSWatcher } from "chokidar";
+import { getStableConfigPath } from "../config";
 
 export const chatRouter = Router();
-const configPath = path.resolve("config.json");
+const configPath = getStableConfigPath();
+const legacyConfigPath = path.resolve("config.json");
 let config = loadConfig();
 let chatFileContent = config.chatPath
   ? fs.readFileSync(config.chatPath, "utf-8")
   : "";
 let messages = parseMessages(chatFileContent);
 let wss: WebSocket;
+let chatFileWatcher: FSWatcher | undefined;
 
 if (config && chatFileContent) {
   setupChatFileWatcher();
 }
 
 function loadConfig() {
-  return fs.existsSync(configPath)
-    ? JSON.parse(fs.readFileSync(configPath).toString())
-    : {};
+  const sourcePath = fs.existsSync(configPath)
+    ? configPath
+    : legacyConfigPath;
+
+  if (!fs.existsSync(sourcePath)) {
+    return {};
+  }
+
+  const loadedConfig = JSON.parse(fs.readFileSync(sourcePath).toString());
+  if (sourcePath === legacyConfigPath && !fs.existsSync(configPath)) {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(loadedConfig, null, 2));
+  }
+
+  return loadedConfig;
 }
 
 function updateConfig(newConfig: Record<string, any>) {
   const config = loadConfig();
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(
     configPath,
     JSON.stringify({ ...config, ...newConfig }, null, 2),
@@ -50,6 +66,7 @@ chatRouter.post("/", (req, res) => {
     ? fs.readFileSync(config.chatPath, "utf-8")
     : "";
   messages = parseMessages(chatFileContent);
+  setupChatFileWatcher();
 
   res.send("Chat path saved");
 });
@@ -117,13 +134,14 @@ export function wsChat(ws: WebSocket, _req: Request) {
 function setupChatFileWatcher() {
   if (!config.chatPath) return;
 
-  const watcher = chokidar.watch(config.chatPath, {
+  void chatFileWatcher?.close();
+  chatFileWatcher = chokidar.watch(config.chatPath, {
     persistent: true,
     usePolling: true,
     interval: 100,
   });
 
-  watcher.on("change", (path) => {
+  chatFileWatcher.on("change", (path) => {
     console.log(`File ${path} has been changed`);
     const newContent = fs.readFileSync(path, "utf-8");
     const changes = newContent.slice(chatFileContent.length);

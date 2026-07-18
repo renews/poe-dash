@@ -3,6 +3,7 @@ import { Poe2WebsocketClient } from "../services/Poe2WebsocketClient";
 import { Poe2Item } from "../services/types";
 import { Poe2Trade } from "../services/poe2trade";
 import { wait } from "../utils/wait";
+import { primaryButtonClassName } from "./formStyles";
 
 interface LiveMonitorButtonProps {
   accountName: string;
@@ -133,7 +134,7 @@ export const LiveMonitorButton: React.FC<LiveMonitorButtonProps> = ({
   return (
     <button
       onClick={liveMonitor}
-      className="bg-blue-500 text-white p-2 rounded"
+      className={primaryButtonClassName}
     >
       Live Monitor
     </button>

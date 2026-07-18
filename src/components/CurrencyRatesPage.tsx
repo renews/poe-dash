@@ -1,8 +1,13 @@
 import React from "react";
 import { Coins } from "lucide-react";
 import { useAppContext } from "../contexts/AppContext";
-import { formatDate, formatPriceAmount } from "../services/types";
+import { formatDateTime, formatPriceAmount } from "../services/types";
 import { League, Leagues } from "../data/leagues";
+import {
+  formFieldClassName,
+  formLabelClassName,
+  primaryButtonClassName,
+} from "./formStyles";
 
 const rateRows = [
   { currency: "Chaos", comparedTo: "Exalted", key: "exalted:chaos" },
@@ -21,21 +26,21 @@ const CurrencyRatesPage: React.FC = () => {
   } = useAppContext();
 
   return (
-    <div className="container mx-auto p-4 pt-16">
+    <div className="w-full p-4 pt-16">
       <div className="flex items-center gap-3 mb-6">
         <Coins className="h-8 w-8 text-yellow-300" />
         <h1 className="text-2xl font-bold">Currency Rates</h1>
       </div>
 
       <div className="flex flex-wrap items-end gap-4 mb-6">
-        <label className="flex flex-col gap-1 text-sm text-gray-300">
+        <label className={formLabelClassName}>
           League
           <select
             value={selectedLeague}
             onChange={(event) =>
               setSelectedLeague(event.target.value as League)
             }
-            className="border p-2 text-gray-900"
+            className={formFieldClassName}
           >
             {Leagues.map((league) => (
               <option key={league} value={league}>
@@ -47,7 +52,7 @@ const CurrencyRatesPage: React.FC = () => {
         <button
           onClick={() => void refreshCurrencyRates()}
           disabled={isRefreshingCurrencyRates}
-          className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-500 text-white font-semibold py-2 px-4 rounded"
+          className={primaryButtonClassName}
         >
           {isRefreshingCurrencyRates ? "Refreshing..." : "Refresh Rates"}
         </button>
@@ -56,7 +61,7 @@ const CurrencyRatesPage: React.FC = () => {
       <p className="text-gray-400 mb-4">
         Rates refresh automatically when the app starts and every hour.
         {currencyRatesUpdatedAt
-          ? ` Last updated ${formatDate(currencyRatesUpdatedAt)}.`
+          ? ` Last updated ${formatDateTime(currencyRatesUpdatedAt)}.`
           : " Waiting for the first live refresh."}
       </p>
 
