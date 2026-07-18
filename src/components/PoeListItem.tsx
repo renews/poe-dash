@@ -265,6 +265,14 @@ export function PoeListItem(props: {
   const itemLeague = item.item?.league || props.league;
   const priceEstimate = props.priceEstimate;
   const hasGreatPrice = priceEstimate?.matchesCurrentPrice === true;
+  const comparableCount = priceEstimate?.comparables?.length || 0;
+  const sourceComparableCount =
+    priceEstimate?.sourceComparableCount ?? comparableCount;
+  const marketValuation =
+    priceEstimate?.source === "poe2scout" ? priceEstimate.market : undefined;
+  const confidenceLabel = priceEstimate?.confidence
+    ? `${priceEstimate.confidence[0].toUpperCase()}${priceEstimate.confidence.slice(1)}`
+    : "Unknown";
   const usedExplicitHashes = priceEstimate?.search?.explicitHashes
     ? new Set(priceEstimate.search.explicitHashes)
     : undefined;
@@ -421,9 +429,28 @@ export function PoeListItem(props: {
         {priceEstimate && (
           <details className="bg-gray-700 p-3 rounded-md mb-4 text-left">
             <summary className="cursor-pointer font-semibold text-orange-300">
-              Suggested price uses {priceEstimate.comparables?.length || 0}{" "}
-              listings
+              {marketValuation
+                ? `Poe2Scout market value · ${marketValuation.quantity.toLocaleString()} volume`
+                : `Suggested price uses ${comparableCount} of ${sourceComparableCount} listings · ${confidenceLabel} confidence`}
             </summary>
+            <p className="mt-2 text-xs text-gray-400">
+              {marketValuation ? (
+                <>
+                  Source: Poe2Scout market history · Updated:{" "}
+                  {formatDateTime(marketValuation.updatedAt)}
+                  {comparableCount > 0
+                    ? ` · ${comparableCount} official trade comparable${comparableCount === 1 ? "" : "s"} shown below`
+                    : " · official trade comparables unavailable"}
+                </>
+              ) : (
+                <>
+                  Method: robust median
+                  {(priceEstimate.excludedComparableCount || 0) > 0
+                    ? ` · ${priceEstimate.excludedComparableCount} duplicate, stale, or outlier listing${priceEstimate.excludedComparableCount === 1 ? "" : "s"} excluded`
+                    : " · no listings excluded"}
+                </>
+              )}
+            </p>
             <p
               className="text-sm text-gray-300 mt-2"
               title={
@@ -447,35 +474,69 @@ export function PoeListItem(props: {
                 ? ` · item level ≥ ${priceEstimate.search.itemLevel}`
                 : ""}
             </p>
-            <ul className="text-sm text-gray-200 mt-2 space-y-1">
-              {(priceEstimate.comparables || []).map((comparable, index) => (
-                <li
-                  key={`${comparable.itemId}-${index}`}
-                  tabIndex={comparable.item ? 0 : undefined}
-                  className="group relative rounded px-1 py-0.5 hover:bg-gray-600 focus:bg-gray-600"
-                >
-                  <span>
-                    {comparable.listedAmount} {comparable.listedCurrency}
-                    {comparable.currency !== comparable.listedCurrency && (
-                      <span className="text-gray-400">
-                        {` (~${formatPriceAmount(comparable.amount)} ${comparable.currency})`}
-                      </span>
-                    )}
-                  </span>
-                  {comparable.item && (
-                    <ComparableItemTooltip
-                      item={comparable.item}
-                      usedExplicitHashes={usedExplicitHashes}
-                      usedImplicitHashes={usedImplicitHashes}
-                    />
+            {marketValuation && marketValuation.history.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-blue-200">
+                  Recent market history
+                </p>
+                <ul className="mt-1 space-y-1 text-xs text-gray-300">
+                  {marketValuation.history
+                    .slice(-6)
+                    .reverse()
+                    .map((point) => (
+                      <li key={point.updatedAt}>
+                        {formatDateTime(point.updatedAt)} ·{" "}
+                        {formatPriceAmount(point.amount)} exalted ·{" "}
+                        {point.quantity.toLocaleString()} volume
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
+            {comparableCount > 0 && (
+              <div className="mt-3">
+                {marketValuation && (
+                  <p className="text-xs font-semibold uppercase tracking-wide text-green-200">
+                    Official trade comparables
+                  </p>
+                )}
+                <ul className="mt-1 space-y-1 text-sm text-gray-200">
+                  {(priceEstimate.comparables || []).map(
+                    (comparable, index) => (
+                      <li
+                        key={`${comparable.itemId}-${index}`}
+                        tabIndex={comparable.item ? 0 : undefined}
+                        className="group relative rounded px-1 py-0.5 hover:bg-gray-600 focus:bg-gray-600"
+                      >
+                        <span>
+                          {comparable.listedAmount}{" "}
+                          {comparable.listedCurrency}
+                          {comparable.currency !==
+                            comparable.listedCurrency && (
+                            <span className="text-gray-400">
+                              {` (~${formatPriceAmount(comparable.amount)} ${comparable.currency})`}
+                            </span>
+                          )}
+                        </span>
+                        {comparable.item && (
+                          <ComparableItemTooltip
+                            item={comparable.item}
+                            usedExplicitHashes={usedExplicitHashes}
+                            usedImplicitHashes={usedImplicitHashes}
+                          />
+                        )}
+                      </li>
+                    ),
                   )}
-                </li>
-              ))}
-            </ul>
+                </ul>
+              </div>
+            )}
             <p className="text-sm text-gray-300 mt-2">
               {hasGreatPrice
                 ? "Already with a great price!"
-                : `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency} | Spread: ${formatPriceAmount(priceEstimate.stdDev.amount)} ${priceEstimate.stdDev.currency}`}
+                : marketValuation
+                  ? `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency}`
+                  : `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency} | Spread: ${formatPriceAmount(priceEstimate.stdDev.amount)} ${priceEstimate.stdDev.currency}`}
               {priceEstimate.checkedAt !== undefined &&
                 ` | Checked at: ${formatDateTime(priceEstimate.checkedAt)}`}
             </p>

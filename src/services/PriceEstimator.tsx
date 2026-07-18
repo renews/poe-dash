@@ -1,5 +1,6 @@
 import {
   formatItemMod,
+  getItemModifierHash,
   ItemMod,
   ModifierSelection,
   normalizeModifierHash,
@@ -11,6 +12,26 @@ import { Poe2Trade } from "./poe2trade";
 import { getCurrencyRateFromOverview } from "./Poe2TradeClient";
 import { Cache } from "./Cache";
 import { Stats } from "../data/stats";
+import {
+  analyzeComparablePrices,
+  ComparableExclusionReason,
+  PriceConfidence,
+} from "./priceAnalysis";
+import { recordPriceSnapshot } from "./priceHistory";
+import { ApiRequestRunOptions } from "./ApiRequestQueue";
+import {
+  Poe2Scout,
+  Poe2ScoutMarketValuation,
+} from "./Poe2ScoutClient";
+
+function rethrowIfRequestCancelled(
+  error: unknown,
+  options: ApiRequestRunOptions,
+) {
+  if (options.signal?.aborted) {
+    throw error;
+  }
+}
 
 export type Stat = (typeof Stats)[0]["entries"][0];
 export type Explicit = Poe2Item["item"]["extended"]["mods"]["explicit"][0];
@@ -26,6 +47,13 @@ export type Estimate = {
   price: Price;
   stdDev: Price;
   comparables: ComparablePrice[];
+  sourceComparableCount?: number;
+  excludedComparableCount?: number;
+  excludedByReason?: Record<ComparableExclusionReason, number>;
+  confidence?: PriceConfidence;
+  source?: "official-trade" | "poe2scout";
+  method?: "median" | "market-history";
+  market?: Poe2ScoutMarketValuation;
   search: {
     league?: string;
     baseType?: string;
@@ -46,7 +74,7 @@ export const MIN_MODIFIER_RANGE_PERCENT = 5;
 export const MAX_MODIFIER_RANGE_PERCENT = 100;
 export const DEFAULT_MODIFIER_RANGE_PERCENT = 12;
 export const CURRENCY_RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
-export const MODIFIER_COMPARISON_VERSION = 3;
+export const MODIFIER_COMPARISON_VERSION = 5;
 
 const CURRENCY_IDS = ["exalted", "chaos", "divine", "mirror"] as const;
 export type CurrencyRates = Record<string, number>;
@@ -415,6 +443,7 @@ class PriceEstimator {
     league?: string,
     modifierSelection?: ModifierSelection,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
+    options: ApiRequestRunOptions = {},
   ) {
     const itemLeague = item.item?.league || league;
     const metadata = getItemSearchMetadata(item);
@@ -446,6 +475,7 @@ class PriceEstimator {
         modifierRangePercent,
       ),
       itemLeague,
+      options,
     );
 
     return topMatch;
@@ -456,6 +486,7 @@ class PriceEstimator {
     league?: string,
     modifierSelection?: ModifierSelection,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
+    options: ApiRequestRunOptions = {},
   ) {
     const itemLeague = item.item?.league || league;
     const metadata = getItemSearchMetadata(item);
@@ -477,32 +508,103 @@ class PriceEstimator {
       !isGemItem(item) && modifierSelection?.itemLevel === true;
     console.log("Estimating price for item in league:", league);
 
-    const allPrices: ComparablePrice[] = [];
     const currency = "exalted";
 
-    // Use the exact same search query and result set as the Search button.
-    const matchingItems = await this.findMatchingItem(
+    const marketValuationPromise = Poe2Scout.getMarketValuation(
       item,
       itemLeague,
-      modifierSelection,
-      modifierRangePercent,
+      options,
     );
-    const filtered = (matchingItems.result || []).filter(
-      (id) => id !== item.id,
-    );
-    allPrices.push(
-      ...(await this.getPricesForItemIds(filtered, currency, itemLeague)),
-    );
+    const tradeComparablesPromise = (async () => {
+      // Keep the official comparables in exact parity with the Search button.
+      const matchingItems = await this.findMatchingItem(
+        item,
+        itemLeague,
+        modifierSelection,
+        modifierRangePercent,
+        options,
+      );
+      const filtered = (matchingItems.result || []).filter(
+        (id) => id !== item.id,
+      );
+      return this.getPricesForItemIds(
+        filtered,
+        currency,
+        itemLeague,
+        options,
+      );
+    })();
+    const [marketResult, tradeResult] = await Promise.allSettled([
+      marketValuationPromise,
+      tradeComparablesPromise,
+    ]);
 
-    await this.fetchManyExchangeRates(
-      currency,
-      allPrices.map((p) => p.currency),
-      itemLeague,
-    );
+    if (options.signal?.aborted) {
+      const cancelledResult = [marketResult, tradeResult].find(
+        (result) => result.status === "rejected",
+      );
+      throw cancelledResult?.status === "rejected"
+        ? cancelledResult.reason
+        : new Error("Request cancelled");
+    }
+
+    const marketValuation =
+      marketResult.status === "fulfilled" ? marketResult.value : undefined;
+    if (marketResult.status === "rejected") {
+      console.warn(
+        "Unable to fetch Poe2Scout market valuation; using trade comparables",
+        marketResult.reason,
+      );
+    }
+
+    if (tradeResult.status === "rejected" && !marketValuation) {
+      throw tradeResult.reason;
+    }
+    if (tradeResult.status === "rejected") {
+      console.warn(
+        "Unable to fetch official trade comparables; using Poe2Scout valuation",
+        tradeResult.reason,
+      );
+    }
+
+    const allPrices =
+      tradeResult.status === "fulfilled" ? tradeResult.value : [];
+
+    if (allPrices.length) {
+      await this.fetchManyExchangeRates(
+        currency,
+        allPrices.map((p) => p.currency),
+        itemLeague,
+        options,
+      );
+    }
+    const tradeEstimate = allPrices.length
+      ? this.priceEstimate(allPrices)
+      : undefined;
+    if (!marketValuation && !tradeEstimate) {
+      throw new Error("No comparable listings found in the selected league.");
+    }
+
     const estimate: Estimate = {
       checkedAt: Date.now(),
-      ...this.priceEstimate(allPrices),
-      comparables: allPrices,
+      ...(tradeEstimate || {
+        price: marketValuation!.price,
+        stdDev: { amount: 0, currency: marketValuation!.price.currency },
+        comparables: [],
+        sourceComparableCount: 0,
+        excludedComparableCount: 0,
+      }),
+      ...(marketValuation
+        ? {
+            source: "poe2scout" as const,
+            method: "market-history" as const,
+            price: marketValuation.price,
+            market: marketValuation,
+          }
+        : {
+            source: "official-trade" as const,
+            method: "median" as const,
+          }),
       search: {
         league: itemLeague,
         baseType,
@@ -522,17 +624,25 @@ class PriceEstimator {
       },
     };
 
-    estimate.price = await this.upscalePrice(estimate.price, itemLeague);
-    estimate.stdDev = await this.upscalePrice(estimate.stdDev, itemLeague);
+    estimate.price = await this.upscalePrice(estimate.price, itemLeague, options);
+    if (estimate.stdDev.amount > 0) {
+      estimate.stdDev = await this.upscalePrice(
+        estimate.stdDev,
+        itemLeague,
+        options,
+      );
+    }
     estimate.matchesCurrentPrice = await this.matchesCurrentPrice(
       item,
       estimate.price,
       itemLeague,
+      options,
     );
 
     console.log({ allPrices, estimate, item });
 
     this.cachePriceEstimate(item.item.id, estimate);
+    recordPriceSnapshot(item, estimate);
     return estimate;
   }
 
@@ -601,6 +711,7 @@ class PriceEstimator {
     item: Poe2Item,
     suggestedPrice: Price,
     league?: string,
+    options: ApiRequestRunOptions = {},
   ) {
     const listedPrice = item.listing?.price;
     if (!listedPrice) {
@@ -612,6 +723,8 @@ class PriceEstimator {
         suggestedPrice.currency,
         listedPrice.currency,
         league,
+        false,
+        options,
       );
       const listedAmountInSuggestedCurrency = listedPrice.amount * rate;
       return (
@@ -619,6 +732,7 @@ class PriceEstimator {
         suggestedPrice.amount
       );
     } catch (error) {
+      rethrowIfRequestCancelled(error, options);
       console.warn("Unable to compare suggested and listed prices", error);
       return false;
     }
@@ -656,8 +770,9 @@ class PriceEstimator {
     ids: string[],
     currency = "exalted",
     league?: string,
+    options: ApiRequestRunOptions = {},
   ): Promise<ComparablePrice[]> {
-    const items = await Poe2Trade.fetchItems(ids);
+    const items = await Poe2Trade.fetchItems(ids, options);
     const fetchedItems = items.result || [];
 
     const currencies = Poe2Trade.toUniqueItems(
@@ -665,7 +780,7 @@ class PriceEstimator {
         .map((i) => i.listing.price.currency)
         .concat(fetchedItems.map((i) => i.listing.price.currency)),
     );
-    await this.fetchManyExchangeRates(currency, currencies, league);
+    await this.fetchManyExchangeRates(currency, currencies, league, options);
 
     const prices = this.toEquivalentPrices(
       currency,
@@ -693,10 +808,20 @@ class PriceEstimator {
     return new Array(want).fill(0).map((_v, i) => items[i * skip]);
   }
 
-  async upscalePrice(price: Price, league?: string) {
+  async upscalePrice(
+    price: Price,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     try {
       if (price.currency === "exalted") {
-        const chaosRate = await this.exchangeRate("exalted", "chaos", league);
+        const chaosRate = await this.exchangeRate(
+          "exalted",
+          "chaos",
+          league,
+          false,
+          options,
+        );
         const chaosAmount = price.amount / chaosRate;
 
         if (chaosAmount >= 0.5) {
@@ -711,6 +836,8 @@ class PriceEstimator {
               "chaos",
               "divine",
               league,
+              false,
+              options,
             );
             const divineAmount = chaosAmount / divineRate;
 
@@ -722,9 +849,11 @@ class PriceEstimator {
                   lowerPrice: chaosPrice,
                 },
                 league,
+                options,
               );
             }
           } catch (error) {
+            rethrowIfRequestCancelled(error, options);
             console.warn("Unable to promote price to divine", error);
           }
 
@@ -733,7 +862,13 @@ class PriceEstimator {
       }
 
       if (price.currency === "chaos") {
-        const divineRate = await this.exchangeRate("chaos", "divine", league);
+        const divineRate = await this.exchangeRate(
+          "chaos",
+          "divine",
+          league,
+          false,
+          options,
+        );
         const divineAmount = price.amount / divineRate;
 
         if (divineAmount >= 0.5) {
@@ -744,12 +879,19 @@ class PriceEstimator {
               lowerPrice: { ...price },
             },
             league,
+            options,
           );
         }
       }
 
       if (price.currency === "divine") {
-        const chaosRate = await this.exchangeRate("chaos", "divine", league);
+        const chaosRate = await this.exchangeRate(
+          "chaos",
+          "divine",
+          league,
+          false,
+          options,
+        );
         return this.promoteDivineToMirror(
           {
             ...price,
@@ -759,11 +901,18 @@ class PriceEstimator {
             },
           },
           league,
+          options,
         );
       }
 
       if (price.currency === "mirror") {
-        const divineRate = await this.exchangeRate("divine", "mirror", league);
+        const divineRate = await this.exchangeRate(
+          "divine",
+          "mirror",
+          league,
+          false,
+          options,
+        );
         return {
           ...price,
           lowerPrice: {
@@ -773,15 +922,26 @@ class PriceEstimator {
         };
       }
     } catch (error) {
+      rethrowIfRequestCancelled(error, options);
       console.warn("Unable to promote suggested price currency", error);
     }
 
     return price;
   }
 
-  async promoteDivineToMirror(price: Price, league?: string) {
+  async promoteDivineToMirror(
+    price: Price,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     try {
-      const mirrorRate = await this.exchangeRate("divine", "mirror", league);
+      const mirrorRate = await this.exchangeRate(
+        "divine",
+        "mirror",
+        league,
+        false,
+        options,
+      );
       const mirrorAmount = price.amount / mirrorRate;
 
       if (mirrorAmount >= 0.5) {
@@ -792,6 +952,7 @@ class PriceEstimator {
         };
       }
     } catch (error) {
+      rethrowIfRequestCancelled(error, options);
       console.warn("Unable to promote suggested price to mirror", error);
     }
 
@@ -824,17 +985,21 @@ class PriceEstimator {
       throw new Error("Multiple currencies found");
     }
 
-    const priceAmounts = prices.map((p) => p.amount);
-
-    const price = this.mean(priceAmounts);
-
-    const stdDev = this.stdDev(priceAmounts);
-
     const currency = currencies[0];
+    const analysis = analyzeComparablePrices(prices);
+    if (!analysis.included.length) {
+      throw new Error("No reliable comparable listings were found.");
+    }
 
     return {
-      price: { amount: price, currency },
-      stdDev: { amount: stdDev, currency },
+      price: { amount: analysis.median, currency },
+      stdDev: { amount: analysis.spread, currency },
+      comparables: analysis.included as ComparablePrice[],
+      sourceComparableCount: prices.length,
+      excludedComparableCount: prices.length - analysis.included.length,
+      excludedByReason: analysis.excludedByReason,
+      confidence: analysis.confidence,
+      method: "median" as const,
     };
   }
 
@@ -853,8 +1018,7 @@ class PriceEstimator {
     league?: string,
   ) {
     const cacheKey = `exchange_rates`;
-    const cache = localStorage.getItem(cacheKey);
-    const cacheData = cache ? JSON.parse(cache) : {};
+    const cacheData = Cache.getJson<Record<string, number>>(cacheKey) || {};
 
     const key = getExchangeRateCacheKey(iWant, iHave, league);
     cacheData[key] = rate;
@@ -946,15 +1110,35 @@ class PriceEstimator {
     iWant: string,
     iHave: string[],
     league?: string,
+    options: ApiRequestRunOptions = {},
   ) {
     for (const currency of Poe2Trade.toUniqueItems(iHave)) {
-      await this.exchangeRate(iWant, currency, league);
+      await this.exchangeRate(iWant, currency, league, false, options);
     }
   }
 
-  async avgExchangeRate(iWant: string, iHave: string, league?: string) {
-    const rate1 = await this.exchangeRate(iWant, iHave, league);
-    const rate2 = 1 / (await this.exchangeRate(iHave, iWant, league));
+  async avgExchangeRate(
+    iWant: string,
+    iHave: string,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
+    const rate1 = await this.exchangeRate(
+      iWant,
+      iHave,
+      league,
+      false,
+      options,
+    );
+    const rate2 =
+      1 /
+      (await this.exchangeRate(
+        iHave,
+        iWant,
+        league,
+        false,
+        options,
+      ));
 
     return (rate1 + rate2) / 2;
   }
@@ -964,6 +1148,7 @@ class PriceEstimator {
     iHave: string,
     league?: string,
     forceRefresh = false,
+    options: ApiRequestRunOptions = {},
   ) {
     const cached = this.getCachedExchangeRates(iWant, iHave, league);
 
@@ -983,7 +1168,7 @@ class PriceEstimator {
 
     try {
       const overview =
-        await Poe2Trade.client.getCurrencyExchangeOverview(league);
+        await Poe2Trade.client.getCurrencyExchangeOverview(league, options);
       const rate = getCurrencyRateFromOverview(overview, iWant, iHave);
 
       if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
@@ -991,6 +1176,7 @@ class PriceEstimator {
         return rate;
       }
     } catch (error) {
+      rethrowIfRequestCancelled(error, options);
       console.warn(
         "Currency overview unavailable, using trade exchange",
         error,
@@ -1001,13 +1187,21 @@ class PriceEstimator {
       (iWant === "divine" && iHave === "mirror") ||
       (iWant === "mirror" && iHave === "divine")
     ) {
-      const divinePerMirror = await Poe2Trade.client.getMirrorRate(league);
+      const divinePerMirror = await Poe2Trade.client.getMirrorRate(
+        league,
+        options,
+      );
       const rate = iWant === "divine" ? divinePerMirror : 1 / divinePerMirror;
       await this.cacheExchangeRates(iWant, iHave, rate, league);
       return rate;
     }
 
-    const swaps = await Poe2Trade.client.getCurrencySwaps(iWant, iHave, league);
+    const swaps = await Poe2Trade.client.getCurrencySwaps(
+      iWant,
+      iHave,
+      league,
+      options,
+    );
     const amounts = Object.values(swaps.result)
       .map((s) =>
         s.listing.offers.map((o) => ({
@@ -1145,23 +1339,38 @@ class PriceEstimator {
   }
 
   parseItemMods(item: Poe2Item) {
-    const parseMods = (mods?: ItemMod[]) =>
-      (mods || []).flatMap((mod) => {
+    const parseMods = (
+      mods: ItemMod[] | undefined,
+      section: "explicit" | "implicit" | "enchant",
+    ) =>
+      (mods || []).flatMap((mod, index) => {
+        const description = formatItemMod(mod);
+        const authoritativeHash = getItemModifierHash(
+          item,
+          section,
+          index,
+          mod,
+        );
         try {
-          return [this.extractMod(formatItemMod(mod))];
+          const parsed = this.extractMod(description);
+          return [
+            authoritativeHash
+              ? { ...parsed, hash: authoritativeHash }
+              : parsed,
+          ];
         } catch {
-          if (typeof mod !== "string") {
-            const values = formatItemMod(mod)
+          if (authoritativeHash) {
+            const values = description
               .match(/[-+]?\d+(?:\.\d+)?/g)
               ?.map(Number);
 
             return [
               {
-                mod: mod.description,
-                parsed: mod.description,
+                mod: description,
+                parsed: description,
                 value1: values?.[0],
                 value2: values?.[1],
-                hash: normalizeModifierHash(mod.hash),
+                hash: authoritativeHash,
               },
             ];
           }
@@ -1174,9 +1383,9 @@ class PriceEstimator {
         }
       });
 
-    const explicits = parseMods(item.item?.explicitMods);
-    const implicits = parseMods(item.item?.implicitMods);
-    const enchants = parseMods(item.item?.enchantMods);
+    const explicits = parseMods(item.item?.explicitMods, "explicit");
+    const implicits = parseMods(item.item?.implicitMods, "implicit");
+    const enchants = parseMods(item.item?.enchantMods, "enchant");
 
     console.log({ explicits, implicits, enchants });
 

@@ -1,6 +1,11 @@
 import { Poe2Item, Poe2ItemSearch } from "./types";
 import { Cache } from "../services/Cache";
 import { Poe2TradeClient } from "./Poe2TradeClient";
+import {
+  getAccountItemDetailsCacheKey,
+  getAccountItemsCacheKey,
+} from "./accountCache";
+import { ApiRequestRunOptions } from "./ApiRequestQueue";
 
 class Poe2TradeService {
   client = new Poe2TradeClient();
@@ -9,8 +14,20 @@ class Poe2TradeService {
     return [...new Set(items)];
   }
 
-  async getAccountItems(account: string, price = 1, currency = "exalted", league?: string) {
-    return this.client.getAccountItems(account, price, currency, league);
+  async getAccountItems(
+    account: string,
+    price = 1,
+    currency = "exalted",
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
+    return this.client.getAccountItems(
+      account,
+      price,
+      currency,
+      league,
+      options,
+    );
   }
 
   async getAllAccountItemsByItemLevel(
@@ -18,6 +35,7 @@ class Poe2TradeService {
     price: number,
     currency: string,
     league?: string,
+    options: ApiRequestRunOptions = {},
   ) {
     const initial = await this.getAccountItemsByItemLevel(
       account,
@@ -26,6 +44,7 @@ class Poe2TradeService {
       undefined,
       undefined,
       league,
+      options,
     );
 
     const itemsAtSamePrice = initial.total;
@@ -37,6 +56,7 @@ class Poe2TradeService {
     let maxItemLevel = undefined;
 
     while (allItems.length < itemsAtSamePrice) {
+      const previousItemCount = allItems.length;
       console.log(
         "Fetching items with min",
         minItemLevel,
@@ -53,14 +73,20 @@ class Poe2TradeService {
         minItemLevel,
         maxItemLevel,
         league,
+        options,
       );
 
       const fetches = await this.fetchAllItems(
         account,
-        initial.result.slice(-5),
+        iLevelRange.result.slice(-5),
+        false,
+        league,
+        options,
       );
-      // Take the highest item level from the last 5 items fetched
       const lastItem = fetches.sort((a, b) => b.item.ilvl - a.item.ilvl)[0];
+      if (!lastItem) {
+        break;
+      }
 
       if (
         !iLevelRange.result.length ||
@@ -102,6 +128,15 @@ class Poe2TradeService {
 
       allItems.push(...iLevelRange.result);
       allItems = this.toUniqueItems(allItems);
+
+      if (
+        allItems.length === previousItemCount &&
+        allItems.length < itemsAtSamePrice
+      ) {
+        throw new Error(
+          `Account sync stalled while splitting ${price} ${currency} listings by item level.`,
+        );
+      }
     }
 
     return allItems;
@@ -112,11 +147,12 @@ class Poe2TradeService {
     price: number,
     currency: string,
     seenItems: string[],
+    league?: string,
   ) {
-    let allCachedItems = this.getCachedAccountItems(account);
+    let allCachedItems = this.getCachedAccountItems(account, league);
 
     for (const item of allCachedItems) {
-      const cachedItem = this.getCachedAccountItemDetails(account, item);
+      const cachedItem = this.getCachedAccountItemDetails(account, item, league);
       if (
         cachedItem &&
         cachedItem.listing.price.amount < price &&
@@ -131,41 +167,41 @@ class Poe2TradeService {
           cachedItem.listing.price.currency,
         );
         allCachedItems = allCachedItems.filter((i) => i !== item);
-        this.setCachedAccountItems(account, allCachedItems);
+        this.setCachedAccountItems(account, allCachedItems, league);
 
-        const itemDetails = this.getAccountItemDetailsCache(account);
+        const itemDetails = this.getAccountItemDetailsCache(account, league);
         delete itemDetails[item];
-        this.setAccountItemDetails(account, itemDetails);
+        this.setAccountItemDetails(account, itemDetails, league);
       }
     }
   }
 
-  public async getAllCachedAccountItems(account: string) {
-    const allCachedItems = await this.getCachedAccountItems(account);
-    const allCachedItemDetails = this.getAccountItemDetailsCache(account);
+  public async getAllCachedAccountItems(account: string, league?: string) {
+    const allCachedItems = this.getCachedAccountItems(account, league);
+    const allCachedItemDetails = this.getAccountItemDetailsCache(account, league);
 
     return allCachedItems
       .map((itemId) => allCachedItemDetails[itemId])
       .filter(Boolean);
   }
 
-  public getCachedAccountItems(account: string): string[] {
-    const cacheKey = `poe2trade_account_${account}`;
+  public getCachedAccountItems(account: string, league?: string): string[] {
+    const cacheKey = getAccountItemsCacheKey(account, league);
     return Cache.getJson<string[]>(cacheKey) || [];
   }
 
-  upsertCachedAccountItems(account: string, items: string[]) {
-    const existingItems = this.getCachedAccountItems(account);
+  upsertCachedAccountItems(account: string, items: string[], league?: string) {
+    const existingItems = this.getCachedAccountItems(account, league);
 
     if (existingItems) {
       items = [...new Set([...existingItems, ...items])];
     }
 
-    this.setCachedAccountItems(account, items);
+    this.setCachedAccountItems(account, items, league);
   }
 
-  setCachedAccountItems(account: string, items: string[]) {
-    const cacheKey = `poe2trade_account_${account}`;
+  setCachedAccountItems(account: string, items: string[], league?: string) {
+    const cacheKey = getAccountItemsCacheKey(account, league);
     const uniqueItems = [...new Set(items)];
     Cache.setJson(cacheKey, uniqueItems);
   }
@@ -179,8 +215,12 @@ class Poe2TradeService {
     return min || max ? params : undefined;
   }
 
-  async getItemByAttributes(searchParams: Poe2ItemSearch, league?: string) {
-    return this.client.getItemByAttributes(searchParams, league);
+  async getItemByAttributes(
+    searchParams: Poe2ItemSearch,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
+    return this.client.getItemByAttributes(searchParams, league, options);
   }
 
   async getAccountItemsByItemLevel(
@@ -190,6 +230,7 @@ class Poe2TradeService {
     minItemLevel?: number,
     maxItemLevel?: number,
     league?: string,
+    options: ApiRequestRunOptions = {},
   ) {
     return this.client.getAccountItemsByItemLevel(
       account,
@@ -198,47 +239,62 @@ class Poe2TradeService {
       minItemLevel,
       maxItemLevel,
       league,
+      options,
     );
   }
 
-  async fetchItems(items: string[]) {
-    return this.client.fetchItems(items);
+  async fetchItems(items: string[], options: ApiRequestRunOptions = {}) {
+    return this.client.fetchItems(items, options);
   }
 
-  getCachedAccountItemDetails(account: string, itemId: string): Poe2Item {
-    const cachedItems = this.getAccountItemDetailsCache(account);
+  getCachedAccountItemDetails(
+    account: string,
+    itemId: string,
+    league?: string,
+  ): Poe2Item {
+    const cachedItems = this.getAccountItemDetailsCache(account, league);
     return cachedItems[itemId];
   }
 
-  getAccountItemDetailsCacheKey(account: string): string {
-    return `poe2trade_account_${account}_items`;
-  }
-
-  getAccountItemDetailsCache(account: string): {
+  getAccountItemDetailsCache(account: string, league?: string): {
     [key: string]: Poe2Item;
   } {
-    const cacheKey = this.getAccountItemDetailsCacheKey(account);
+    const cacheKey = getAccountItemDetailsCacheKey(account, league);
     return Cache.getJson(cacheKey) || {};
   }
 
-  upsertAccountItemDetails(account: string, item: Poe2Item) {
-    const cachedItems = this.getAccountItemDetailsCache(account);
+  upsertAccountItemDetails(account: string, item: Poe2Item, league?: string) {
+    const cachedItems = this.getAccountItemDetailsCache(account, league);
     cachedItems[item.id] = item;
-    this.setAccountItemDetails(account, cachedItems);
+    this.setAccountItemDetails(account, cachedItems, league);
   }
 
-  setAccountItemDetails(account: string, items: { [key: string]: Poe2Item }) {
-    const cacheKey = this.getAccountItemDetailsCacheKey(account);
+  setAccountItemDetails(
+    account: string,
+    items: { [key: string]: Poe2Item },
+    league?: string,
+  ) {
+    const cacheKey = getAccountItemDetailsCacheKey(account, league);
     Cache.setJson(cacheKey, items);
   }
 
-  async fetchAllItems(account: string, items: string[], refresh = false) {
+  async fetchAllItems(
+    account: string,
+    items: string[],
+    refresh = false,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     const allItems: Poe2Item[] = [];
     const itemsToFetch: string[] = [];
 
     // Check cache first
     for (const itemId of items) {
-      const cachedItem = this.getCachedAccountItemDetails(account, itemId);
+      const cachedItem = this.getCachedAccountItemDetails(
+        account,
+        itemId,
+        league,
+      );
       if (cachedItem && !refresh) {
         allItems.push(cachedItem);
       } else {
@@ -250,11 +306,11 @@ class Poe2TradeService {
 
     while (items.length) {
       console.log(`Fetching ${items.length} items`);
-      const response = await this.fetchItems(items);
+      const response = await this.fetchItems(items, options);
 
       // Store fetched items in cache
       response.result.forEach((item) =>
-        this.upsertAccountItemDetails(account, item),
+        this.upsertAccountItemDetails(account, item, league),
       );
 
       allItems.push(...response.result);

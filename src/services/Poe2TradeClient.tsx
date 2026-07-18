@@ -6,6 +6,12 @@ import {
   Poe2FetchItems,
   Poe2ItemSearch,
 } from "./types";
+import {
+  ApiRequestQueue,
+  ApiRequestRunOptions,
+} from "./ApiRequestQueue";
+
+export const MIN_API_REQUEST_INTERVAL_MS = 2_500;
 
 export function parseMirrorRateFromPage(html: string): number | undefined {
   const match = html.match(
@@ -79,6 +85,10 @@ export function buildTradeStatFilters(
 }
 
 export class Poe2TradeClient {
+  private readonly requests = new ApiRequestQueue({
+    maxRetries: 2,
+    minIntervalMs: MIN_API_REQUEST_INTERVAL_MS,
+  });
   port = 7555;
   requestTimeout = 30_000;
   baseUrl = `http://localhost:${this.port}`;
@@ -94,28 +104,33 @@ export class Poe2TradeClient {
     price = 1,
     currency = "exalted",
     league?: string,
+    options: ApiRequestRunOptions = {},
   ) {
     const url = `${this.apiUrl}/search/poe2/${league || this.league}`;
     console.log("Requesting", url, "account", account, "price", price);
-    const response = await axios.post(
-      url,
-      {
-        query: {
-          filters: {
-            trade_filters: {
+    const response = await this.requests.run(
+      () =>
+        axios.post(
+          url,
+          {
+            query: {
               filters: {
-                account: { input: account },
-                price: {
-                  min: price,
-                  option: currency === "exalted" ? undefined : currency,
+                trade_filters: {
+                  filters: {
+                    account: { input: account },
+                    price: {
+                      min: price,
+                      option: currency === "exalted" ? undefined : currency,
+                    },
+                  },
                 },
               },
             },
+            sort: { price: "asc" },
           },
-        },
-        sort: { price: "asc" },
-      },
-      { timeout: this.requestTimeout },
+          { timeout: this.requestTimeout, signal: options.signal },
+        ),
+      options,
     );
     return response.data as Poe2TradeSearch;
   }
@@ -129,7 +144,11 @@ export class Poe2TradeClient {
     return min || max ? params : undefined;
   }
 
-  async getItemByAttributes(searchParams: Poe2ItemSearch, league?: string) {
+  async getItemByAttributes(
+    searchParams: Poe2ItemSearch,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     const url = `${this.apiUrl}/search/poe2/${league || this.league}`;
     console.log("Requesting", url, "searchParams", searchParams);
     const statFilters = buildTradeStatFilters(searchParams);
@@ -220,9 +239,14 @@ export class Poe2TradeClient {
       }
     }
 
-    const response = await axios.post(url, payload, {
-      timeout: this.requestTimeout,
-    });
+    const response = await this.requests.run(
+      () =>
+        axios.post(url, payload, {
+          timeout: this.requestTimeout,
+          signal: options.signal,
+        }),
+      options,
+    );
     return response.data as Poe2TradeSearch;
   }
 
@@ -233,53 +257,67 @@ export class Poe2TradeClient {
     minItemLevel?: number,
     maxItemLevel?: number,
     league?: string,
+    options: ApiRequestRunOptions = {},
   ) {
     const url = `${this.apiUrl}/search/poe2/${league || this.league}`;
     console.log("Requesting", url, "account", account, "price", price);
-    const response = await axios.post(
-      url,
-      {
-        query: {
-          filters: {
-            trade_filters: {
+    const response = await this.requests.run(
+      () =>
+        axios.post(
+          url,
+          {
+            query: {
               filters: {
-                account: { input: account },
-                price: {
-                  min: price,
-                  max: price,
-                  option: currency === "exalted" ? undefined : currency,
+                trade_filters: {
+                  filters: {
+                    account: { input: account },
+                    price: {
+                      min: price,
+                      max: price,
+                      option: currency === "exalted" ? undefined : currency,
+                    },
+                  },
+                },
+                type_filters: {
+                  filters: {
+                    ilvl: {
+                      ...(minItemLevel && { min: minItemLevel }),
+                      ...(maxItemLevel && { max: maxItemLevel }),
+                    },
+                  },
                 },
               },
             },
-            type_filters: {
-              filters: {
-                ilvl: {
-                  ...(minItemLevel && { min: minItemLevel }),
-                  ...(maxItemLevel && { max: maxItemLevel }),
-                },
-              },
-            },
+            sort: { ilvl: "asc" },
           },
-        },
-        sort: { ilvl: "asc" },
-      },
-      { timeout: this.requestTimeout },
+          { timeout: this.requestTimeout, signal: options.signal },
+        ),
+      options,
     );
     return response.data as Poe2TradeSearch;
   }
 
-  async fetchItems(items: string[]) {
+  async fetchItems(items: string[], options: ApiRequestRunOptions = {}) {
     if (!items.length) {
       return { result: [] } as Poe2FetchItems;
     }
-    const response = await axios.get(
-      `${this.apiUrl}/fetch/${items.slice(0, 10).join(",")}?&realm=poe2`,
-      { timeout: this.requestTimeout },
+    const response = await this.requests.run(
+      () =>
+        axios.get(
+          `${this.apiUrl}/fetch/${items.slice(0, 10).join(",")}?&realm=poe2`,
+          { timeout: this.requestTimeout, signal: options.signal },
+        ),
+      options,
     );
     return response.data as Poe2FetchItems;
   }
 
-  async getCurrencySwaps(iWant: string, iHave: string, league?: string) {
+  async getCurrencySwaps(
+    iWant: string,
+    iHave: string,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     const url = `${this.apiUrl}/exchange/poe2/${league || this.league}`;
     const payload = {
       query: {
@@ -291,24 +329,42 @@ export class Poe2TradeClient {
       engine: "new",
     };
     console.log("Requesting", url, "iWant", iWant, "iHave", iHave);
-    const response = await axios.post(url, payload, {
-      timeout: this.requestTimeout,
-    });
+    const response = await this.requests.run(
+      () =>
+        axios.post(url, payload, {
+          timeout: this.requestTimeout,
+          signal: options.signal,
+        }),
+      options,
+    );
     return response.data as Poe2ExchangeSearch;
   }
 
-  async getCurrencyExchangeOverview(league?: string) {
+  async getCurrencyExchangeOverview(
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     const params = new URLSearchParams({
       league: league || this.league,
       type: "Currency",
     });
     const url = `${this.economyApiUrl}?${params.toString()}`;
     console.log("Requesting currency overview", url);
-    const response = await axios.get(url, { timeout: this.requestTimeout });
+    const response = await this.requests.run(
+      () =>
+        axios.get(url, {
+          timeout: this.requestTimeout,
+          signal: options.signal,
+        }),
+      options,
+    );
     return response.data as Poe2CurrencyExchangeOverview;
   }
 
-  async getMirrorRate(league?: string) {
+  async getMirrorRate(
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
     const leagueSlug = (league || this.league)
       .trim()
       .toLowerCase()
@@ -317,7 +373,14 @@ export class Poe2TradeClient {
     const url = `${this.baseUrl}/proxy/${this.mirrorRateUrl}/${leagueSlug}/divine/mirror`;
     console.log("Requesting Mirror rate", url);
 
-    const response = await axios.get(url, { timeout: this.requestTimeout });
+    const response = await this.requests.run(
+      () =>
+        axios.get(url, {
+          timeout: this.requestTimeout,
+          signal: options.signal,
+        }),
+      options,
+    );
     const rate = parseMirrorRateFromPage(response.data as string);
     if (rate === undefined) {
       throw new Error(`No Mirror rate found for ${league || this.league}.`);
