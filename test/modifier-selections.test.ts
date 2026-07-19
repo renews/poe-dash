@@ -9,6 +9,9 @@ test("restores valid modifier selections and ignores invalid saved entries", () 
           explicit: [true, false],
           implicit: [true],
           itemLevel: true,
+          requiredLevel: true,
+          requiredLevelMin: 60,
+          requiredLevelMax: 70,
         },
         invalid: { explicit: "not-an-array", implicit: [] },
       }),
@@ -18,8 +21,26 @@ test("restores valid modifier selections and ignores invalid saved entries", () 
       explicit: [true, false],
       implicit: [true],
       itemLevel: true,
+      requiredLevel: true,
+      requiredLevelMin: 60,
+      requiredLevelMax: 70,
     },
   });
+});
+
+test("ignores saved modifier selections with invalid requirement ranges", () => {
+  expect(
+    parseModifierSelections(
+      JSON.stringify({
+        invalid: {
+          explicit: [],
+          implicit: [],
+          requiredLevel: true,
+          requiredLevelMin: "sixty",
+        },
+      }),
+    ),
+  ).toEqual({});
 });
 
 test("returns no selections for missing or invalid storage", () => {

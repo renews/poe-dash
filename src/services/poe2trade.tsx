@@ -30,6 +30,14 @@ class Poe2TradeService {
     );
   }
 
+  async getAccountLiveSearch(
+    account: string,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
+    return this.client.getAccountLiveSearch(account, league, options);
+  }
+
   async getAllAccountItemsByItemLevel(
     account: string,
     price: number,

@@ -7,6 +7,7 @@ import {
   Price,
   Poe2Item,
   Poe2ItemSearch,
+  Poe2TradeSearch,
 } from "./types";
 import { Poe2Trade } from "./poe2trade";
 import { getCurrencyRateFromOverview } from "./Poe2TradeClient";
@@ -23,6 +24,10 @@ import {
   Poe2Scout,
   Poe2ScoutMarketValuation,
 } from "./Poe2ScoutClient";
+import {
+  classifyPricePosition,
+  PricePosition,
+} from "./pricePosition";
 
 function rethrowIfRequestCancelled(
   error: unknown,
@@ -52,7 +57,7 @@ export type Estimate = {
   excludedByReason?: Record<ComparableExclusionReason, number>;
   confidence?: PriceConfidence;
   source?: "official-trade" | "poe2scout";
-  method?: "median" | "market-history";
+  method?: "median" | "market-history" | "market-current";
   market?: Poe2ScoutMarketValuation;
   search: {
     league?: string;
@@ -60,6 +65,11 @@ export type Estimate = {
     name?: string;
     rarity?: string;
     itemLevel?: number;
+    requiredLevelMin?: number;
+    requiredLevelMax?: number;
+    strategy?: "strict" | "one-mod-relaxed";
+    selectedModifierCount?: number;
+    minimumModifierCount?: number;
     modifierComparisonVersion?: number;
     explicitCount: number;
     implicitCount?: number;
@@ -74,7 +84,7 @@ export const MIN_MODIFIER_RANGE_PERCENT = 5;
 export const MAX_MODIFIER_RANGE_PERCENT = 100;
 export const DEFAULT_MODIFIER_RANGE_PERCENT = 12;
 export const CURRENCY_RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
-export const MODIFIER_COMPARISON_VERSION = 5;
+export const MODIFIER_COMPARISON_VERSION = 6;
 
 const CURRENCY_IDS = ["exalted", "chaos", "divine", "mirror"] as const;
 export type CurrencyRates = Record<string, number>;
@@ -148,6 +158,18 @@ export function selectSelectedModifiers<T>(
 
 export function roundCurrencyAmount(amount: number) {
   return Math.floor(amount + 0.5);
+}
+
+function getPrecisePrice(price: Price) {
+  let precisePrice = price;
+  for (let depth = 0; depth < CURRENCY_IDS.length; depth++) {
+    const lowerPrice = precisePrice.lowerPrice;
+    if (!lowerPrice) {
+      break;
+    }
+    precisePrice = lowerPrice;
+  }
+  return precisePrice;
 }
 
 export function normalizeModifierRangePercent(value: number) {
@@ -302,6 +324,15 @@ function getNumericItemProperty(item: Poe2Item, name: string) {
   return numericValue === undefined ? undefined : Number(numericValue);
 }
 
+export function getItemRequiredLevel(item: Poe2Item) {
+  const requirement = item.item?.requirements?.find(
+    (entry) => entry.name?.trim().toLowerCase() === "level",
+  );
+  const value = requirement?.values?.[0]?.[0];
+  const numericValue = value?.match(/\d+/)?.[0];
+  return numericValue === undefined ? undefined : Number(numericValue);
+}
+
 const RARE_ITEM_CATEGORY_PATTERNS = [
   { pattern: /amulet\b/, category: "accessory.amulet" },
   { pattern: /ring\b/, category: "accessory.ring" },
@@ -352,6 +383,7 @@ export function getItemSearchMetadata(item: Poe2Item) {
   const gemLevel = item.item?.gemLevel ?? getNumericItemProperty(item, "Level");
   const quality = item.item?.quality ?? getNumericItemProperty(item, "Quality");
   const isGem = isGemItem(item);
+  const requiredLevel = isGem ? undefined : getItemRequiredLevel(item);
   const rarity = isGem ? undefined : rawRarity?.toLowerCase();
   const category =
     rarity === "rare" ? getRareItemCategory(item) : undefined;
@@ -367,8 +399,44 @@ export function getItemSearchMetadata(item: Poe2Item) {
     ...(!isGem && item.item?.ilvl !== undefined
       ? { itemLevel: item.item.ilvl }
       : {}),
+    ...(requiredLevel !== undefined ? { requiredLevel } : {}),
     ...(gemLevel !== undefined ? { gemLevel } : {}),
     ...(quality !== undefined ? { quality } : {}),
+  };
+}
+
+export type RequiredLevelRange = {
+  min: number;
+  max: number;
+};
+
+function normalizeRequiredLevel(value: number | undefined, fallback: number) {
+  return Math.max(
+    0,
+    Math.round(Number.isFinite(value) ? (value as number) : fallback),
+  );
+}
+
+export function getRequiredLevelSearchRange(
+  requiredLevel: number | undefined,
+  selection?: ModifierSelection,
+): RequiredLevelRange | undefined {
+  if (requiredLevel === undefined || selection?.requiredLevel !== true) {
+    return undefined;
+  }
+
+  const first = normalizeRequiredLevel(
+    selection.requiredLevelMin,
+    requiredLevel,
+  );
+  const second = normalizeRequiredLevel(
+    selection.requiredLevelMax,
+    requiredLevel,
+  );
+
+  return {
+    min: Math.min(first, second),
+    max: Math.max(first, second),
   };
 }
 
@@ -387,6 +455,7 @@ export function getItemSearchFilters(
     quality?: number;
   },
   includeItemLevel = false,
+  requiredLevelRange?: RequiredLevelRange,
 ) {
   return {
     ...(includeItemLevel && metadata.itemLevel !== undefined
@@ -397,6 +466,9 @@ export function getItemSearchFilters(
       : {}),
     ...(metadata.quality !== undefined
       ? { quality: metadata.quality, quality_max: metadata.quality }
+      : {}),
+    ...(requiredLevelRange
+      ? { lvl: requiredLevelRange.min, lvl_max: requiredLevelRange.max }
       : {}),
   };
 }
@@ -409,6 +481,7 @@ class PriceEstimator {
     selectedImplicits: ParsedItemMod[],
     topN: number,
     includeItemLevel: boolean,
+    requiredLevelRange?: RequiredLevelRange,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
   ): Promise<Poe2ItemSearch> {
     const gem = isGemItem(item);
@@ -429,7 +502,11 @@ class PriceEstimator {
         ? {}
         : { baseType: metadata.baseType }),
       ...(metadata.category ? { category: metadata.category } : {}),
-      ...getItemSearchFilters(metadata, includeItemLevel),
+      ...getItemSearchFilters(
+        metadata,
+        includeItemLevel,
+        requiredLevelRange,
+      ),
       ...buildModifierSearchFilters(
         explicit,
         implicit,
@@ -444,7 +521,7 @@ class PriceEstimator {
     modifierSelection?: ModifierSelection,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
     options: ApiRequestRunOptions = {},
-  ) {
+  ): Promise<Poe2TradeSearch> {
     const itemLeague = item.item?.league || league;
     const metadata = getItemSearchMetadata(item);
     const { baseType } = metadata;
@@ -463,22 +540,61 @@ class PriceEstimator {
     );
     const includeItemLevel =
       !isGemItem(item) && modifierSelection?.itemLevel === true;
+    const requiredLevelRange = getRequiredLevelSearchRange(
+      metadata.requiredLevel,
+      modifierSelection,
+    );
 
-    const topMatch = await Poe2Trade.getItemByAttributes(
-      await this.getComparableSearchParams(
-        item,
-        metadata,
-        selectedExplicits,
-        selectedImplicits,
-        selectedExplicits.length,
-        includeItemLevel,
-        modifierRangePercent,
-      ),
+    const strictSearch = await this.getComparableSearchParams(
+      item,
+      metadata,
+      selectedExplicits,
+      selectedImplicits,
+      selectedExplicits.length,
+      includeItemLevel,
+      requiredLevelRange,
+      modifierRangePercent,
+    );
+    const selectedModifierCount = [
+      ...(strictSearch.explicit || []),
+      ...(strictSearch.implicit || []),
+      ...(strictSearch.pseudo || []),
+    ].length;
+    const strictMatch = await Poe2Trade.getItemByAttributes(
+      strictSearch,
+      itemLeague,
+      options,
+    );
+    const hasStrictComparable = (strictMatch.result || []).some(
+      (id) => !item.id || id !== item.id,
+    );
+
+    if (hasStrictComparable || selectedModifierCount < 2) {
+      return {
+        ...strictMatch,
+        strategy: "strict",
+        selectedModifierCount,
+        minimumModifierCount: selectedModifierCount,
+      };
+    }
+
+    const minimumModifierCount = selectedModifierCount - 1;
+    const relaxedMatch = await Poe2Trade.getItemByAttributes(
+      {
+        ...strictSearch,
+        statGroupType: "count",
+        statGroupMin: minimumModifierCount,
+      },
       itemLeague,
       options,
     );
 
-    return topMatch;
+    return {
+      ...relaxedMatch,
+      strategy: "one-mod-relaxed",
+      selectedModifierCount,
+      minimumModifierCount,
+    };
   }
 
   async estimateItemPrice(
@@ -506,6 +622,10 @@ class PriceEstimator {
     );
     const includeItemLevel =
       !isGemItem(item) && modifierSelection?.itemLevel === true;
+    const requiredLevelRange = getRequiredLevelSearchRange(
+      metadata.requiredLevel,
+      modifierSelection,
+    );
     console.log("Estimating price for item in league:", league);
 
     const currency = "exalted";
@@ -527,12 +647,15 @@ class PriceEstimator {
       const filtered = (matchingItems.result || []).filter(
         (id) => id !== item.id,
       );
-      return this.getPricesForItemIds(
-        filtered,
-        currency,
-        itemLeague,
-        options,
-      );
+      return {
+        matchingItems,
+        prices: await this.getPricesForItemIds(
+          filtered,
+          currency,
+          itemLeague,
+          options,
+        ),
+      };
     })();
     const [marketResult, tradeResult] = await Promise.allSettled([
       marketValuationPromise,
@@ -567,8 +690,12 @@ class PriceEstimator {
       );
     }
 
+    const tradeSearch =
+      tradeResult.status === "fulfilled"
+        ? tradeResult.value.matchingItems
+        : undefined;
     const allPrices =
-      tradeResult.status === "fulfilled" ? tradeResult.value : [];
+      tradeResult.status === "fulfilled" ? tradeResult.value.prices : [];
 
     if (allPrices.length) {
       await this.fetchManyExchangeRates(
@@ -585,6 +712,16 @@ class PriceEstimator {
       throw new Error("No comparable listings found in the selected league.");
     }
 
+    const hasSpecificSearchFilters =
+      (tradeSearch?.selectedModifierCount || 0) > 0 ||
+      includeItemLevel ||
+      requiredLevelRange !== undefined ||
+      metadata.gemLevel !== undefined ||
+      metadata.quality !== undefined;
+    const useTradeAsPrimary =
+      tradeEstimate !== undefined &&
+      (marketValuation === undefined || hasSpecificSearchFilters);
+
     const estimate: Estimate = {
       checkedAt: Date.now(),
       ...(tradeEstimate || {
@@ -594,17 +731,25 @@ class PriceEstimator {
         sourceComparableCount: 0,
         excludedComparableCount: 0,
       }),
-      ...(marketValuation
+      ...(useTradeAsPrimary
+        ? {
+            source: "official-trade" as const,
+            method: "median" as const,
+          }
+        : marketValuation
         ? {
             source: "poe2scout" as const,
-            method: "market-history" as const,
+            method:
+              marketValuation.method === "current-snapshot"
+                ? ("market-current" as const)
+                : ("market-history" as const),
             price: marketValuation.price,
-            market: marketValuation,
           }
         : {
             source: "official-trade" as const,
             method: "median" as const,
           }),
+      ...(marketValuation ? { market: marketValuation } : {}),
       search: {
         league: itemLeague,
         baseType,
@@ -612,6 +757,19 @@ class PriceEstimator {
         rarity,
         ...(includeItemLevel && metadata.itemLevel !== undefined
           ? { itemLevel: metadata.itemLevel }
+          : {}),
+        ...(requiredLevelRange
+          ? {
+              requiredLevelMin: requiredLevelRange.min,
+              requiredLevelMax: requiredLevelRange.max,
+            }
+          : {}),
+        ...(tradeSearch?.strategy
+          ? {
+              strategy: tradeSearch.strategy,
+              selectedModifierCount: tradeSearch.selectedModifierCount,
+              minimumModifierCount: tradeSearch.minimumModifierCount,
+            }
           : {}),
         modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
         explicitCount: selectedExplicits.length,
@@ -623,6 +781,13 @@ class PriceEstimator {
         ),
       },
     };
+
+    if (
+      useTradeAsPrimary &&
+      tradeSearch?.strategy === "one-mod-relaxed"
+    ) {
+      estimate.confidence = "low";
+    }
 
     estimate.price = await this.upscalePrice(estimate.price, itemLeague, options);
     if (estimate.stdDev.amount > 0) {
@@ -637,6 +802,7 @@ class PriceEstimator {
       estimate.price,
       itemLeague,
       options,
+      estimate.stdDev,
     );
 
     console.log({ allPrices, estimate, item });
@@ -676,6 +842,17 @@ class PriceEstimator {
       return false;
     }
 
+    const selectedRequiredLevelRange = getRequiredLevelSearchRange(
+      getItemRequiredLevel(item),
+      modifierSelection,
+    );
+    if (
+      estimate.search?.requiredLevelMin !== selectedRequiredLevelRange?.min ||
+      estimate.search?.requiredLevelMax !== selectedRequiredLevelRange?.max
+    ) {
+      return false;
+    }
+
     if (!modifierSelection) {
       return true;
     }
@@ -712,29 +889,60 @@ class PriceEstimator {
     suggestedPrice: Price,
     league?: string,
     options: ApiRequestRunOptions = {},
+    spread?: Price,
   ) {
+    return (
+      (await this.getListingPricePosition(
+        item,
+        suggestedPrice,
+        spread,
+        league,
+        options,
+      )) === "fair"
+    );
+  }
+
+  async getListingPricePosition(
+    item: Poe2Item,
+    suggestedPrice: Price,
+    spread?: Price,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ): Promise<PricePosition> {
     const listedPrice = item.listing?.price;
     if (!listedPrice) {
-      return false;
+      return "unpriced";
     }
 
     try {
-      const rate = await this.exchangeRate(
-        suggestedPrice.currency,
+      const preciseSuggestedPrice = getPrecisePrice(suggestedPrice);
+      const preciseSpread = spread ? getPrecisePrice(spread) : undefined;
+      const listedRate = await this.exchangeRate(
+        preciseSuggestedPrice.currency,
         listedPrice.currency,
         league,
         false,
         options,
       );
-      const listedAmountInSuggestedCurrency = listedPrice.amount * rate;
-      return (
-        roundCurrencyAmount(listedAmountInSuggestedCurrency) ===
-        suggestedPrice.amount
+      const spreadRate = preciseSpread
+        ? await this.exchangeRate(
+            preciseSuggestedPrice.currency,
+            preciseSpread.currency,
+            league,
+            false,
+            options,
+          )
+        : 1;
+
+      return classifyPricePosition(
+        listedPrice.amount * listedRate,
+        preciseSuggestedPrice.amount,
+        (preciseSpread?.amount || 0) * spreadRate,
       );
     } catch (error) {
       rethrowIfRequestCancelled(error, options);
       console.warn("Unable to compare suggested and listed prices", error);
-      return false;
+      return "unpriced";
     }
   }
 

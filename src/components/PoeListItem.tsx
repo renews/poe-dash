@@ -10,8 +10,15 @@ import {
   ModifierDisplayKind,
 } from "../services/types";
 import { useState } from "react";
-import { Estimate, isGemItem, PriceChecker } from "../services/PriceEstimator";
+import {
+  Estimate,
+  getItemRequiredLevel,
+  isGemItem,
+  PriceChecker,
+} from "../services/PriceEstimator";
 import { createTradeSearchUrl } from "../services/externalLinks";
+import { getListingSinceLabel } from "../services/listing";
+import { formFieldClassName } from "./formStyles";
 
 const ItemNameWithRarity: React.FC<{ item: Poe2Item }> = ({ item }) => {
   const getRarityColor = (rarity: string = "magic") => {
@@ -159,11 +166,33 @@ export function PoeListItem(props: {
   onRefreshClick?: (item: Poe2Item) => void;
 }) {
   const { item } = props;
-  const [searchId, setSearchId] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [isPriceChecking, setIsPriceChecking] = useState(false);
   const [priceCheckError, setPriceCheckError] = useState<string | null>(null);
   const gemItem = isGemItem(item);
+  const requiredLevel = gemItem ? undefined : getItemRequiredLevel(item);
+
+  const getCompleteModifierSelection = (
+    overrides: Partial<ModifierSelection> = {},
+  ): ModifierSelection => ({
+    implicit:
+      props.modifierSelection?.implicit ||
+      (item.item.implicitMods || []).map(() => true),
+    explicit:
+      props.modifierSelection?.explicit ||
+      (item.item.explicitMods || []).map(() => true),
+    itemLevel: props.modifierSelection?.itemLevel === true,
+    requiredLevel: props.modifierSelection?.requiredLevel === true,
+    ...(requiredLevel !== undefined
+      ? {
+          requiredLevelMin:
+            props.modifierSelection?.requiredLevelMin ?? requiredLevel,
+          requiredLevelMax:
+            props.modifierSelection?.requiredLevelMax ?? requiredLevel,
+        }
+      : {}),
+    ...overrides,
+  });
 
   const isModifierSelected = (kind: ModifierKind, index: number) =>
     props.modifierSelection?.[kind]?.[index] !== false;
@@ -183,19 +212,9 @@ export function PoeListItem(props: {
     );
     values[index] = checked;
 
-    props.onModifierSelectionChange?.({
-      implicit:
-        kind === "implicit"
-          ? values
-          : props.modifierSelection?.implicit ||
-            (item.item.implicitMods || []).map(() => true),
-      explicit:
-        kind === "explicit"
-          ? values
-          : props.modifierSelection?.explicit ||
-            (item.item.explicitMods || []).map(() => true),
-      itemLevel: props.modifierSelection?.itemLevel === true,
-    });
+    props.onModifierSelectionChange?.(
+      getCompleteModifierSelection({ [kind]: values }),
+    );
   };
 
   const copyNameToClipboard = () => {
@@ -207,27 +226,21 @@ export function PoeListItem(props: {
     setSearchError(null);
 
     try {
-      if (!searchId) {
-        const matchingItem = await PriceChecker.findMatchingItem(
-          item,
-          itemLeague,
-          props.modifierSelection,
-          props.modifierRangePercent,
-        );
-        if (!matchingItem?.id) {
-          setSearchError("No trade search was created.");
-          return;
-        }
-
-        setSearchId(matchingItem.id);
-        window.open(
-          createTradeSearchUrl(itemLeague, matchingItem.id),
-          "_blank",
-        );
+      const matchingItem = await PriceChecker.findMatchingItem(
+        item,
+        itemLeague,
+        getCompleteModifierSelection(),
+        props.modifierRangePercent,
+      );
+      if (!matchingItem?.id) {
+        setSearchError("No trade search was created.");
         return;
       }
 
-      window.open(createTradeSearchUrl(itemLeague, searchId), "_blank");
+      window.open(
+        createTradeSearchUrl(itemLeague, matchingItem.id),
+        "_blank",
+      );
     } catch (error) {
       setSearchError(
         error instanceof Error ? error.message : "Unable to open trade search.",
@@ -242,17 +255,7 @@ export function PoeListItem(props: {
     setPriceCheckError(null);
 
     try {
-      await props.onPriceClick(item, {
-        implicit: (item.item.implicitMods || []).map(
-          (_modifier, index) =>
-            props.modifierSelection?.implicit?.[index] !== false,
-        ),
-        explicit: (item.item.explicitMods || []).map(
-          (_modifier, index) =>
-            props.modifierSelection?.explicit?.[index] !== false,
-        ),
-        itemLevel: !gemItem && props.modifierSelection?.itemLevel === true,
-      });
+      await props.onPriceClick(item, getCompleteModifierSelection());
     } catch (error) {
       setPriceCheckError(
         error instanceof Error ? error.message : "Price check failed.",
@@ -263,13 +266,14 @@ export function PoeListItem(props: {
   };
 
   const itemLeague = item.item?.league || props.league;
+  const listingSinceLabel = getListingSinceLabel(item.listing?.indexed);
   const priceEstimate = props.priceEstimate;
   const hasGreatPrice = priceEstimate?.matchesCurrentPrice === true;
   const comparableCount = priceEstimate?.comparables?.length || 0;
   const sourceComparableCount =
     priceEstimate?.sourceComparableCount ?? comparableCount;
-  const marketValuation =
-    priceEstimate?.source === "poe2scout" ? priceEstimate.market : undefined;
+  const marketValuation = priceEstimate?.market;
+  const marketIsPrimary = priceEstimate?.source === "poe2scout";
   const confidenceLabel = priceEstimate?.confidence
     ? `${priceEstimate.confidence[0].toUpperCase()}${priceEstimate.confidence.slice(1)}`
     : "Unknown";
@@ -329,20 +333,90 @@ export function PoeListItem(props: {
                   type="checkbox"
                   checked={props.modifierSelection?.itemLevel === true}
                   onChange={(event) =>
-                    props.onModifierSelectionChange?.({
-                      implicit:
-                        props.modifierSelection?.implicit ||
-                        (item.item.implicitMods || []).map(() => true),
-                      explicit:
-                        props.modifierSelection?.explicit ||
-                        (item.item.explicitMods || []).map(() => true),
-                      itemLevel: event.target.checked,
-                    })
+                    props.onModifierSelectionChange?.(
+                      getCompleteModifierSelection({
+                        itemLevel: event.target.checked,
+                      }),
+                    )
                   }
                   className="form-checkbox text-blue-600"
                 />
                 <span>Item level (minimum): {item.item.ilvl}</span>
               </label>
+            </div>
+          )}
+
+          {requiredLevel !== undefined && (
+            <div className="bg-gray-700 p-3 rounded-md">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={props.modifierSelection?.requiredLevel === true}
+                  onChange={(event) =>
+                    props.onModifierSelectionChange?.(
+                      getCompleteModifierSelection({
+                        requiredLevel: event.target.checked,
+                      }),
+                    )
+                  }
+                  className="form-checkbox text-blue-600"
+                />
+                <span>Required level</span>
+              </label>
+              <div className="mt-2 grid grid-cols-2 gap-3">
+                <label className="text-xs text-gray-300">
+                  Minimum
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    disabled={
+                      props.modifierSelection?.requiredLevel !== true
+                    }
+                    value={
+                      props.modifierSelection?.requiredLevelMin ??
+                      requiredLevel
+                    }
+                    onChange={(event) =>
+                      props.onModifierSelectionChange?.(
+                        getCompleteModifierSelection({
+                          requiredLevelMin: Math.max(
+                            0,
+                            Math.round(Number(event.target.value)),
+                          ),
+                        }),
+                      )
+                    }
+                    className={`${formFieldClassName} mt-1 w-full disabled:cursor-not-allowed disabled:opacity-50`}
+                  />
+                </label>
+                <label className="text-xs text-gray-300">
+                  Maximum
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    disabled={
+                      props.modifierSelection?.requiredLevel !== true
+                    }
+                    value={
+                      props.modifierSelection?.requiredLevelMax ??
+                      requiredLevel
+                    }
+                    onChange={(event) =>
+                      props.onModifierSelectionChange?.(
+                        getCompleteModifierSelection({
+                          requiredLevelMax: Math.max(
+                            0,
+                            Math.round(Number(event.target.value)),
+                          ),
+                        }),
+                      )
+                    }
+                    className={`${formFieldClassName} mt-1 w-full disabled:cursor-not-allowed disabled:opacity-50`}
+                  />
+                </label>
+              </div>
             </div>
           )}
 
@@ -429,14 +503,20 @@ export function PoeListItem(props: {
         {priceEstimate && (
           <details className="bg-gray-700 p-3 rounded-md mb-4 text-left">
             <summary className="cursor-pointer font-semibold text-orange-300">
-              {marketValuation
-                ? `Poe2Scout market value · ${marketValuation.quantity.toLocaleString()} volume`
+              {marketIsPrimary && marketValuation
+                ? marketValuation.method === "current-snapshot"
+                  ? "Poe2Scout current market snapshot"
+                  : `Poe2Scout market value · ${marketValuation.quantity.toLocaleString()} volume`
                 : `Suggested price uses ${comparableCount} of ${sourceComparableCount} listings · ${confidenceLabel} confidence`}
             </summary>
             <p className="mt-2 text-xs text-gray-400">
-              {marketValuation ? (
+              {marketIsPrimary && marketValuation ? (
                 <>
-                  Source: Poe2Scout market history · Updated:{" "}
+                  Source: Poe2Scout{" "}
+                  {marketValuation.method === "current-snapshot"
+                    ? "current market snapshot"
+                    : "market history"}{" "}
+                  · Updated:{" "}
                   {formatDateTime(marketValuation.updatedAt)}
                   {comparableCount > 0
                     ? ` · ${comparableCount} official trade comparable${comparableCount === 1 ? "" : "s"} shown below`
@@ -451,6 +531,14 @@ export function PoeListItem(props: {
                 </>
               )}
             </p>
+            {!marketIsPrimary && marketValuation && (
+              <p className="mt-2 rounded border border-blue-700 bg-blue-950/40 p-2 text-xs text-blue-200">
+                Poe2Scout market baseline: {" "}
+                {formatPriceAmount(marketValuation.price.amount)} {" "}
+                {marketValuation.price.currency} · Updated: {" "}
+                {formatDateTime(marketValuation.updatedAt)}
+              </p>
+            )}
             <p
               className="text-sm text-gray-300 mt-2"
               title={
@@ -472,6 +560,13 @@ export function PoeListItem(props: {
               {` · ${priceEstimate.search?.explicitCount || 0} explicit, ${priceEstimate.search?.implicitCount || 0} implicit modifiers`}
               {priceEstimate.search?.itemLevel !== undefined
                 ? ` · item level ≥ ${priceEstimate.search.itemLevel}`
+                : ""}
+              {priceEstimate.search?.requiredLevelMin !== undefined &&
+              priceEstimate.search?.requiredLevelMax !== undefined
+                ? ` · required level ${priceEstimate.search.requiredLevelMin}–${priceEstimate.search.requiredLevelMax}`
+                : ""}
+              {priceEstimate.search?.strategy === "one-mod-relaxed"
+                ? ` · fallback: at least ${priceEstimate.search.minimumModifierCount} of ${priceEstimate.search.selectedModifierCount} selected modifiers`
                 : ""}
             </p>
             {marketValuation && marketValuation.history.length > 0 && (
@@ -534,7 +629,7 @@ export function PoeListItem(props: {
             <p className="text-sm text-gray-300 mt-2">
               {hasGreatPrice
                 ? "Already with a great price!"
-                : marketValuation
+                : marketIsPrimary
                   ? `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency}`
                   : `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency} | Spread: ${formatPriceAmount(priceEstimate.stdDev.amount)} ${priceEstimate.stdDev.currency}`}
               {priceEstimate.checkedAt !== undefined &&
@@ -547,6 +642,9 @@ export function PoeListItem(props: {
           Stash: {item.listing.stash.name} (x: {item.listing.stash.x}, y:{" "}
           {item.listing.stash.y})
         </p>
+        {listingSinceLabel && (
+          <p className="mt-1 text-sm text-gray-400">{listingSinceLabel}</p>
+        )}
       </div>
       <div className="flex flex-col sm:flex-col flex-shrink-0 mt-4 sm:mt-0 sm:ml-4 w-full sm:w-auto gap-4">
         <button

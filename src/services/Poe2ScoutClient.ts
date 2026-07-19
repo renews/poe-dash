@@ -27,6 +27,11 @@ export interface Poe2ScoutHistoryResponse {
   HasMore: boolean;
 }
 
+interface Poe2ScoutLeague {
+  Value: string;
+  BaseCurrencyApiId: string;
+}
+
 export interface Poe2ScoutHistoryPoint {
   amount: number;
   quantity: number;
@@ -40,6 +45,7 @@ export interface Poe2ScoutMarketValuation {
   quantity: number;
   updatedAt: number;
   history: Poe2ScoutHistoryPoint[];
+  method?: "history" | "current-snapshot";
 }
 
 function normalizeLookupText(value?: string | null) {
@@ -117,6 +123,29 @@ export function createPoe2ScoutValuation(
     quantity: latest.quantity,
     updatedAt: latest.updatedAt,
     history,
+    method: "history",
+  };
+}
+
+export function createPoe2ScoutCurrentValuation(
+  item: Poe2ScoutItem,
+  currency: string,
+  updatedAt = Date.now(),
+): Poe2ScoutMarketValuation | undefined {
+  const amount = Number(item.CurrentPrice);
+  const normalizedCurrency = currency.trim().toLowerCase();
+  if (!Number.isFinite(amount) || amount <= 0 || !normalizedCurrency) {
+    return undefined;
+  }
+
+  return {
+    itemId: item.ItemId,
+    itemName: item.Name || item.Text || item.Type || "Item",
+    price: { amount, currency: normalizedCurrency },
+    quantity: 0,
+    updatedAt,
+    history: [],
+    method: "current-snapshot",
   };
 }
 
@@ -135,6 +164,7 @@ export class Poe2ScoutClient {
     string,
     CacheEntry<Poe2ScoutMarketValuation>
   >();
+  private readonly baseCurrencyCache = new Map<string, CacheEntry<string>>();
   port = 7555;
   requestTimeout = 15_000;
   baseUrl = `http://localhost:${this.port}`;
@@ -168,15 +198,36 @@ export class Poe2ScoutClient {
       ReferenceCurrency: "exalted",
     });
     const url = `${this.getLeagueUrl(league)}/Items/${marketItem.ItemId}/History?${params.toString()}`;
-    const response = await this.requests.run(
-      () =>
-        axios.get<Poe2ScoutHistoryResponse>(url, {
-          timeout: this.requestTimeout,
-          signal: options.signal,
-        }),
-      options,
-    );
-    const valuation = createPoe2ScoutValuation(marketItem, response.data);
+    let valuation: Poe2ScoutMarketValuation | undefined;
+    try {
+      const response = await this.requests.run(
+        () =>
+          axios.get<Poe2ScoutHistoryResponse>(url, {
+            timeout: this.requestTimeout,
+            signal: options.signal,
+          }),
+        options,
+      );
+      valuation = createPoe2ScoutValuation(marketItem, response.data);
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      console.warn(
+        "Unable to fetch Poe2Scout history; using current market snapshot",
+        error,
+      );
+    }
+
+    if (!valuation) {
+      const baseCurrency = await this.getBaseCurrency(league, options);
+      if (baseCurrency) {
+        valuation = createPoe2ScoutCurrentValuation(
+          marketItem,
+          baseCurrency,
+        );
+      }
+    }
     if (valuation) {
       this.setCached(this.valuationCache, cacheKey, valuation);
     }
@@ -209,6 +260,44 @@ export class Poe2ScoutClient {
 
   private getLeagueUrl(league: string) {
     return `${this.apiUrl}/poe2/Leagues/${encodeURIComponent(league)}`;
+  }
+
+  private async getBaseCurrency(
+    league: string,
+    options: ApiRequestRunOptions,
+  ) {
+    const cached = this.getCached(this.baseCurrencyCache, league);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const response = await this.requests.run(
+        () =>
+          axios.get<Poe2ScoutLeague[]>(`${this.apiUrl}/poe2/Leagues`, {
+            timeout: this.requestTimeout,
+            signal: options.signal,
+          }),
+        options,
+      );
+      const baseCurrency = response.data
+        .find((candidate) => candidate.Value === league)
+        ?.BaseCurrencyApiId?.trim()
+        .toLowerCase();
+      if (baseCurrency) {
+        this.setCached(this.baseCurrencyCache, league, baseCurrency);
+      }
+      return baseCurrency;
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      console.warn(
+        "Unable to identify the Poe2Scout league base currency; skipping current snapshot",
+        error,
+      );
+      return undefined;
+    }
   }
 
   private getCached<T>(cache: Map<string, CacheEntry<T>>, key: string) {

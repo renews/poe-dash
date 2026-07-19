@@ -27,9 +27,13 @@ export type Poe2ItemSearch = Partial<{
 
   // requirements
   lvl: number;
+  lvl_max: number;
   dex: number;
   str: number;
   int: number;
+
+  statGroupType: "and" | "count";
+  statGroupMin: number;
 
   //maps
   map_tier: number;
@@ -56,6 +60,9 @@ export interface Poe2TradeSearch {
   complexity: number;
   result: string[];
   total: number;
+  strategy?: "strict" | "one-mod-relaxed";
+  selectedModifierCount?: number;
+  minimumModifierCount?: number;
 }
 
 export interface Poe2FetchItems {
@@ -141,7 +148,10 @@ export function formatPriceAmount(amount: number): string {
           ? 3
           : 4;
 
-  return amount.toFixed(decimals).replace(/\.?0+$/, "");
+  const formatted = amount.toFixed(decimals);
+  return formatted.includes(".")
+    ? formatted.replace(/0+$/, "").replace(/\.$/, "")
+    : formatted;
 }
 
 export function formatDate(timestamp: number): string {
@@ -217,6 +227,9 @@ export type ModifierSelection = {
   implicit: boolean[];
   explicit: boolean[];
   itemLevel?: boolean;
+  requiredLevel?: boolean;
+  requiredLevelMin?: number;
+  requiredLevelMax?: number;
 };
 
 export interface Poe2Item {

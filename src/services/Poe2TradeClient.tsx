@@ -135,13 +135,40 @@ export class Poe2TradeClient {
     return response.data as Poe2TradeSearch;
   }
 
+  async getAccountLiveSearch(
+    account: string,
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
+    const url = `${this.apiUrl}/search/poe2/${league || this.league}`;
+    const response = await this.requests.run(
+      () =>
+        axios.post(
+          url,
+          {
+            query: {
+              filters: {
+                trade_filters: {
+                  filters: { account: { input: account } },
+                },
+              },
+            },
+            sort: { indexed: "desc" },
+          },
+          { timeout: this.requestTimeout, signal: options.signal },
+        ),
+      options,
+    );
+    return response.data as Poe2TradeSearch;
+  }
+
   range(min?: number | undefined, max?: number | undefined) {
     const params = {
-      ...(min && { min: min }),
-      ...(max && { max: max }),
+      ...(min !== undefined && { min }),
+      ...(max !== undefined && { max }),
     };
 
-    return min || max ? params : undefined;
+    return min !== undefined || max !== undefined ? params : undefined;
   }
 
   async getItemByAttributes(
@@ -159,7 +186,21 @@ export class Poe2TradeClient {
         type: searchParams.baseType,
         status: { option: searchParams.status || "any" },
         ...(statFilters.length
-          ? { stats: [{ type: "and", filters: statFilters }] }
+          ? {
+              stats: [
+                {
+                  type: searchParams.statGroupType || "and",
+                  ...(searchParams.statGroupType === "count"
+                    ? {
+                        value: {
+                          min: Math.max(1, searchParams.statGroupMin || 1),
+                        },
+                      }
+                    : {}),
+                  filters: statFilters,
+                },
+              ],
+            }
           : {}),
         filters: {
           type_filters: {
@@ -197,7 +238,7 @@ export class Poe2TradeClient {
           },
           req_filters: {
             filters: {
-              lvl: this.range(searchParams.lvl),
+              lvl: this.range(searchParams.lvl, searchParams.lvl_max),
               dex: this.range(searchParams.dex),
               str: this.range(searchParams.str),
               int: this.range(searchParams.int),
