@@ -28,6 +28,7 @@ import {
   classifyPricePosition,
   PricePosition,
 } from "./pricePosition";
+import { getItemCategory } from "./itemCategory";
 
 function rethrowIfRequestCancelled(
   error: unknown,
@@ -62,6 +63,7 @@ export type Estimate = {
   search: {
     league?: string;
     baseType?: string;
+    category?: string;
     name?: string;
     rarity?: string;
     itemLevel?: number;
@@ -84,7 +86,7 @@ export const MIN_MODIFIER_RANGE_PERCENT = 5;
 export const MAX_MODIFIER_RANGE_PERCENT = 100;
 export const DEFAULT_MODIFIER_RANGE_PERCENT = 12;
 export const CURRENCY_RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
-export const MODIFIER_COMPARISON_VERSION = 6;
+export const MODIFIER_COMPARISON_VERSION = 7;
 
 const CURRENCY_IDS = ["exalted", "chaos", "divine", "mirror"] as const;
 export type CurrencyRates = Record<string, number>;
@@ -333,43 +335,6 @@ export function getItemRequiredLevel(item: Poe2Item) {
   return numericValue === undefined ? undefined : Number(numericValue);
 }
 
-const RARE_ITEM_CATEGORY_PATTERNS = [
-  { pattern: /amulet\b/, category: "accessory.amulet" },
-  { pattern: /ring\b/, category: "accessory.ring" },
-  { pattern: /belt\b/, category: "accessory.belt" },
-  { pattern: /quiver\b/, category: "armour.quiver" },
-  { pattern: /buckler\b/, category: "armour.buckler" },
-  { pattern: /focus\b/, category: "armour.focus" },
-  { pattern: /shield\b/, category: "armour.shield" },
-  {
-    pattern:
-      /regalia\b|body armour\b|cuirass\b|brigandine\b|chainmail\b|coat\b|garb\b|mail\b|plate\b|raiment\b|robe\b|vest\b/,
-    category: "armour.chest",
-  },
-  {
-    pattern:
-      /helmet\b|helm\b|pelt\b|hood\b|circlet\b|crown\b|burgonet\b|greathelm\b/,
-    category: "armour.helmet",
-  },
-  {
-    pattern: /gloves\b|gauntlets\b|mitts\b|wraps\b/,
-    category: "armour.gloves",
-  },
-  {
-    pattern: /boots\b|greaves\b|slippers\b|sabatons\b/,
-    category: "armour.boots",
-  },
-  { pattern: /jewel\b/, category: "jewel" },
-  { pattern: /flask\b/, category: "flask" },
-] as const;
-
-function getRareItemCategory(item: Poe2Item) {
-  const text = `${item.item?.typeLine || ""} ${item.item?.baseType || ""}`.toLowerCase();
-  return RARE_ITEM_CATEGORY_PATTERNS.find(({ pattern }) =>
-    pattern.test(text),
-  )?.category;
-}
-
 export function getItemSearchMetadata(item: Poe2Item) {
   const frameRarities: Record<number, string> = {
     0: "normal",
@@ -385,8 +350,7 @@ export function getItemSearchMetadata(item: Poe2Item) {
   const isGem = isGemItem(item);
   const requiredLevel = isGem ? undefined : getItemRequiredLevel(item);
   const rarity = isGem ? undefined : rawRarity?.toLowerCase();
-  const category =
-    rarity === "rare" ? getRareItemCategory(item) : undefined;
+  const category = getItemCategory(item, isGem);
 
   return {
     baseType,
@@ -410,6 +374,14 @@ export type RequiredLevelRange = {
   max: number;
 };
 
+export function getDefaultRequiredLevelRange(
+  requiredLevel: number | undefined,
+): RequiredLevelRange {
+  return requiredLevel === undefined
+    ? { min: 0, max: 2 }
+    : { min: requiredLevel, max: requiredLevel };
+}
+
 function normalizeRequiredLevel(value: number | undefined, fallback: number) {
   return Math.max(
     0,
@@ -421,17 +393,19 @@ export function getRequiredLevelSearchRange(
   requiredLevel: number | undefined,
   selection?: ModifierSelection,
 ): RequiredLevelRange | undefined {
-  if (requiredLevel === undefined || selection?.requiredLevel !== true) {
+  if (selection?.requiredLevel !== true) {
     return undefined;
   }
 
+  const defaults = getDefaultRequiredLevelRange(requiredLevel);
+
   const first = normalizeRequiredLevel(
     selection.requiredLevelMin,
-    requiredLevel,
+    defaults.min,
   );
   const second = normalizeRequiredLevel(
     selection.requiredLevelMax,
-    requiredLevel,
+    defaults.max,
   );
 
   return {
@@ -528,6 +502,9 @@ class PriceEstimator {
     if (!baseType && metadata.rarity !== "rare") {
       throw new Error("Item data is incomplete: base type is missing.");
     }
+    if (!metadata.category) {
+      throw new Error("Item data is incomplete: category is missing.");
+    }
 
     const parsedMods = this.parseItemMods(item);
     const selectedExplicits = selectSelectedModifiers(
@@ -538,12 +515,14 @@ class PriceEstimator {
       parsedMods.implicits || [],
       modifierSelection?.implicit,
     );
-    const includeItemLevel =
-      !isGemItem(item) && modifierSelection?.itemLevel === true;
-    const requiredLevelRange = getRequiredLevelSearchRange(
-      metadata.requiredLevel,
-      modifierSelection,
-    );
+    const gem = isGemItem(item);
+    const includeItemLevel = !gem && modifierSelection?.itemLevel === true;
+    const requiredLevelRange = gem
+      ? undefined
+      : getRequiredLevelSearchRange(
+          metadata.requiredLevel,
+          modifierSelection,
+        );
 
     const strictSearch = await this.getComparableSearchParams(
       item,
@@ -610,6 +589,9 @@ class PriceEstimator {
     if (!baseType && metadata.rarity !== "rare") {
       throw new Error("Item data is incomplete: base type is missing.");
     }
+    if (!metadata.category) {
+      throw new Error("Item data is incomplete: category is missing.");
+    }
 
     const parsedMods = this.parseItemMods(item);
     const selectedExplicits = selectSelectedModifiers(
@@ -620,12 +602,14 @@ class PriceEstimator {
       parsedMods.implicits || [],
       modifierSelection?.implicit,
     );
-    const includeItemLevel =
-      !isGemItem(item) && modifierSelection?.itemLevel === true;
-    const requiredLevelRange = getRequiredLevelSearchRange(
-      metadata.requiredLevel,
-      modifierSelection,
-    );
+    const gem = isGemItem(item);
+    const includeItemLevel = !gem && modifierSelection?.itemLevel === true;
+    const requiredLevelRange = gem
+      ? undefined
+      : getRequiredLevelSearchRange(
+          metadata.requiredLevel,
+          modifierSelection,
+        );
     console.log("Estimating price for item in league:", league);
 
     const currency = "exalted";
@@ -753,6 +737,7 @@ class PriceEstimator {
       search: {
         league: itemLeague,
         baseType,
+        category: metadata.category,
         name,
         rarity,
         ...(includeItemLevel && metadata.itemLevel !== undefined
@@ -824,6 +809,10 @@ class PriceEstimator {
       return false;
     }
 
+    if (estimate.search?.category !== getItemSearchMetadata(item).category) {
+      return false;
+    }
+
     if (
       estimate.search?.modifierRangePercent !== undefined &&
       estimate.search.modifierRangePercent !==
@@ -842,10 +831,12 @@ class PriceEstimator {
       return false;
     }
 
-    const selectedRequiredLevelRange = getRequiredLevelSearchRange(
-      getItemRequiredLevel(item),
-      modifierSelection,
-    );
+    const selectedRequiredLevelRange = isGemItem(item)
+      ? undefined
+      : getRequiredLevelSearchRange(
+          getItemRequiredLevel(item),
+          modifierSelection,
+        );
     if (
       estimate.search?.requiredLevelMin !== selectedRequiredLevelRange?.min ||
       estimate.search?.requiredLevelMax !== selectedRequiredLevelRange?.max

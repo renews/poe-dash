@@ -147,6 +147,7 @@ test("searches unique items by name and unique rarity", () => {
 
   expect(getItemSearchMetadata(item)).toEqual({
     baseType: "Fine Belt",
+    category: "accessory.belt",
     name: "Darkness Enthroned",
     rarity: "unique",
   });
@@ -291,6 +292,48 @@ test("adds an optional minimum and maximum required-level filter for non-gems", 
     });
 
     expect(capturedSearch).toMatchObject({ lvl: 60, lvl_max: 70 });
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("defaults missing non-gem level requirements to a maximum of two", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let capturedSearch: Poe2ItemSearch | undefined;
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    capturedSearch = searchParams;
+    return {
+      id: "query-id",
+      complexity: 0,
+      result: ["comparable-item"],
+      total: 1,
+    };
+  };
+
+  try {
+    await PriceChecker.findMatchingItem(
+      {
+        id: "no-required-level-item",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          typeLine: "Lapis Amulet",
+          baseType: "Lapis Amulet",
+          requirements: [],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+      {
+        explicit: [],
+        implicit: [],
+        requiredLevel: true,
+      },
+    );
+
+    expect(capturedSearch).toMatchObject({ lvl: 0, lvl_max: 2 });
   } finally {
     Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
   }
@@ -918,6 +961,148 @@ test("maps rare body armour to the body armour category", () => {
       },
     } as Poe2Item).category,
   ).toBe("armour.chest");
+});
+
+test("uses the fetched item class to categorize every item search", () => {
+  const cases = [
+    {
+      item: {
+        rarity: "Rare",
+        typeLine: "Hardwood Targe",
+        baseType: "Hardwood Targe",
+        properties: [{ name: "[Shield]", values: [], displayMode: 0 }],
+      },
+      category: "armour.shield",
+    },
+    {
+      item: {
+        rarity: "Rare",
+        typeLine: "Orichalcum Spear",
+        baseType: "Orichalcum Spear",
+        properties: [{ name: "[Spear]", values: [], displayMode: 0 }],
+      },
+      category: "weapon.spear",
+    },
+    {
+      item: {
+        rarity: "Rare",
+        typeLine: "Ring Mail",
+        baseType: "Ring Mail",
+        properties: [],
+      },
+      category: "armour.chest",
+    },
+    {
+      item: {
+        rarity: "Unique",
+        name: "Darkness Enthroned",
+        typeLine: "Fine Belt",
+        baseType: "Fine Belt",
+        properties: [{ name: "Belt", values: [], displayMode: 0 }],
+      },
+      category: "accessory.belt",
+    },
+    {
+      item: {
+        frameType: 4,
+        typeLine: "Healing Runes",
+        baseType: "Healing Runes",
+        properties: [
+          { name: "Level", values: [["15", 0]], displayMode: 0 },
+        ],
+      },
+      category: "gem",
+    },
+  ] as const;
+
+  for (const { item, category } of cases) {
+    expect(getItemSearchMetadata({ item } as Poe2Item).category).toBe(category);
+  }
+});
+
+test("sends the exact category and no base type for rare shield searches", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let capturedSearch: Parameters<typeof Poe2Trade.getItemByAttributes>[0];
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    capturedSearch = searchParams;
+    return { id: "query-id", complexity: 0, result: [], total: 0 };
+  };
+
+  try {
+    await PriceChecker.findMatchingItem(
+      {
+        item: {
+          rarity: "Rare",
+          typeLine: "Hardwood Targe",
+          baseType: "Hardwood Targe",
+          properties: [{ name: "[Shield]", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+    );
+
+    expect(capturedSearch.category).toBe("armour.shield");
+    expect(capturedSearch).not.toHaveProperty("baseType");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("does not send a trade query without an item category", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let requested = false;
+
+  Poe2Trade.getItemByAttributes = async () => {
+    requested = true;
+    return { id: "query-id", complexity: 0, result: [], total: 0 };
+  };
+
+  try {
+    await expect(
+      PriceChecker.findMatchingItem(
+        {
+          item: {
+            rarity: "Rare",
+            typeLine: "Unknown Experimental Base",
+            baseType: "Unknown Experimental Base",
+            properties: [],
+            explicitMods: [],
+            implicitMods: [],
+          },
+        } as Poe2Item,
+        "Standard",
+      ),
+    ).rejects.toThrow("category");
+    expect(requested).toBe(false);
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("does not reuse a cached estimate from another item category", () => {
+  const item = {
+    item: {
+      rarity: "Rare",
+      typeLine: "Ring Mail",
+      baseType: "Ring Mail",
+      properties: [
+        { name: "Body Armour", values: [], displayMode: 0 },
+      ],
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+  const estimate = {
+    search: {
+      category: "accessory.ring",
+      modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+    },
+  } as Estimate;
+
+  expect(PriceChecker.matchesModifierSelection(item, estimate)).toBe(false);
 });
 
 test("omits buyout trade filters from comparable item searches", async () => {

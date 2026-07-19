@@ -12,6 +12,7 @@ import {
 import { useState } from "react";
 import {
   Estimate,
+  getDefaultRequiredLevelRange,
   getItemRequiredLevel,
   isGemItem,
   PriceChecker,
@@ -191,6 +192,9 @@ export function PoeListItem(props: {
   const [isExpanded, setIsExpanded] = useState(true);
   const gemItem = isGemItem(item);
   const requiredLevel = gemItem ? undefined : getItemRequiredLevel(item);
+  const defaultRequiredLevelRange = gemItem
+    ? undefined
+    : getDefaultRequiredLevelRange(requiredLevel);
 
   const getCompleteModifierSelection = (
     overrides: Partial<ModifierSelection> = {},
@@ -203,12 +207,14 @@ export function PoeListItem(props: {
       (item.item.explicitMods || []).map(() => true),
     itemLevel: props.modifierSelection?.itemLevel === true,
     requiredLevel: props.modifierSelection?.requiredLevel === true,
-    ...(requiredLevel !== undefined
+    ...(defaultRequiredLevelRange
       ? {
           requiredLevelMin:
-            props.modifierSelection?.requiredLevelMin ?? requiredLevel,
+            props.modifierSelection?.requiredLevelMin ??
+            defaultRequiredLevelRange.min,
           requiredLevelMax:
-            props.modifierSelection?.requiredLevelMax ?? requiredLevel,
+            props.modifierSelection?.requiredLevelMax ??
+            defaultRequiredLevelRange.max,
         }
       : {}),
     ...overrides,
@@ -370,7 +376,7 @@ export function PoeListItem(props: {
             </div>
           )}
 
-          {requiredLevel !== undefined && (
+          {defaultRequiredLevelRange && (
             <div className="bg-gray-700 p-3 rounded-md">
               <label className="flex cursor-pointer items-center gap-2 text-sm text-gray-200">
                 <input
@@ -399,7 +405,7 @@ export function PoeListItem(props: {
                     }
                     value={
                       props.modifierSelection?.requiredLevelMin ??
-                      requiredLevel
+                      defaultRequiredLevelRange.min
                     }
                     onChange={(event) =>
                       props.onModifierSelectionChange?.(
@@ -425,7 +431,7 @@ export function PoeListItem(props: {
                     }
                     value={
                       props.modifierSelection?.requiredLevelMax ??
-                      requiredLevel
+                      defaultRequiredLevelRange.max
                     }
                     onChange={(event) =>
                       props.onModifierSelectionChange?.(
