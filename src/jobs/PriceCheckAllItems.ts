@@ -67,6 +67,7 @@ export class PriceCheckAllItems extends Job<Estimate> {
     const cached = PriceChecker.getCachedEstimates();
     for (let i = 0; i < this.filteredItems.length; i++) {
       const item = this.filteredItems[i];
+      this.description = getPriceCheckItemName(item);
       await this.onItemStart({
         current: i + 1,
         total: this.filteredItems.length,

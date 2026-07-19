@@ -35,6 +35,18 @@ test("shows the current item while a tab price check is running", () => {
   ).toBe("Checking item 1 of 1: Darkness Enthroned");
 });
 
+test("uses only the current item name as the price-check job description", async () => {
+  const priceCheck = new PriceCheckAllItems([item()]);
+  priceCheck.onItemStart = () => {
+    throw new Error("stop before requesting comparables");
+  };
+
+  await expect(priceCheck._task().next()).rejects.toThrow(
+    "stop before requesting comparables",
+  );
+  expect(priceCheck.description).toBe("Fiery Buckler");
+});
+
 test("shows rate-limit waits and retries during a price check", () => {
   expect(
     getApiRequestProgressLabel({
