@@ -47,6 +47,51 @@ test("uses only the current item name as the price-check job description", async
   expect(priceCheck.description).toBe("Fiery Buckler");
 });
 
+test("clears a failed item's error before checking the next item", async () => {
+  const priceChecker = PriceChecker as unknown as {
+    estimateItemPrice: () => Promise<Estimate>;
+  };
+  const originalEstimate = priceChecker.estimateItemPrice;
+  const originalGetCachedEstimates = PriceChecker.getCachedEstimates;
+  const errorsAtItemStart: string[] = [];
+  let attempt = 0;
+
+  PriceChecker.getCachedEstimates = () => ({});
+  priceChecker.estimateItemPrice = async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      throw new Error("No comparable listings found in the selected league.");
+    }
+
+    return {
+      price: { amount: 1, currency: "exalted" },
+      stdDev: { amount: 0, currency: "exalted" },
+      comparables: [],
+    } as Estimate;
+  };
+
+  try {
+    const priceCheck = new PriceCheckAllItems(
+      [item(), item({ typeLine: "Second Buckler" })],
+      false,
+    );
+    priceCheck.onItemStart = () => {
+      errorsAtItemStart.push(priceCheck.error);
+    };
+
+    for await (const progress of priceCheck._task()) {
+      // Exhaust the job so both items are checked.
+      void progress;
+    }
+
+    expect(errorsAtItemStart).toEqual(["", ""]);
+    expect(priceCheck.error).toBe("");
+  } finally {
+    priceChecker.estimateItemPrice = originalEstimate;
+    PriceChecker.getCachedEstimates = originalGetCachedEstimates;
+  }
+});
+
 test("shows rate-limit waits and retries during a price check", () => {
   expect(
     getApiRequestProgressLabel({
