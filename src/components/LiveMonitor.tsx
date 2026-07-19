@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Poe2Item, Price } from "../services/types";
 import { Estimate, PriceChecker } from "../services/PriceEstimator";
 
 interface LiveMonitorProps {
   items: Poe2Item[];
   priceSuggestions: Record<string, Estimate>;
+  league: string;
 }
 
 const LiveMonitor: React.FC<LiveMonitorProps> = ({
   items,
   priceSuggestions,
+  league,
 }) => {
   const [startTime, setStartTime] = useState<Date | null>(null);
   const [elapsedTime, setElapsedTime] = useState<string>("00:00:00");
@@ -53,7 +55,7 @@ const LiveMonitor: React.FC<LiveMonitorProps> = ({
     };
   }, []);
 
-  const calculateTotalValue = async (items: Poe2Item[]) => {
+  const calculateTotalValue = useCallback(async (items: Poe2Item[]) => {
     const currency = "exalted";
 
     const equivalentPrice = PriceChecker.toEquivalentPrices(
@@ -62,44 +64,58 @@ const LiveMonitor: React.FC<LiveMonitorProps> = ({
         amount: i.listing.price.amount,
         currency: i.listing.price.currency,
       })),
+      league,
     );
 
     const total = PriceChecker.sumPrice(equivalentPrice);
 
-    const upscaled = await PriceChecker.upscalePrice(total);
+    const upscaled = items.length
+      ? await PriceChecker.upscalePrice(total, league)
+      : total;
 
     setTotalListingValue(upscaled);
 
     return upscaled;
-  };
+  }, [league]);
 
-  const calculateTotalSuggestedValue = async (
-    items: Poe2Item[],
-    suggestions: Record<string, Estimate>,
-  ) => {
-    const currency = "exalted";
+  const calculateTotalSuggestedValue = useCallback(
+    async (
+      items: Poe2Item[],
+      suggestions: Record<string, Estimate>,
+    ) => {
+      const currency = "exalted";
 
-    const equivalentPrice = PriceChecker.toEquivalentPrices(
-      currency,
-      items.map((i) => ({
-        amount: suggestions[i.id]?.price?.amount || 0,
-        currency: suggestions[i.id]?.price?.currency || "exalted",
-      })),
-    );
+      const equivalentPrice = PriceChecker.toEquivalentPrices(
+        currency,
+        items.map((i) => ({
+          amount: suggestions[i.id]?.price?.amount || 0,
+          currency: suggestions[i.id]?.price?.currency || "exalted",
+        })),
+        league,
+      );
 
-    const total = PriceChecker.sumPrice(equivalentPrice);
+      const total = PriceChecker.sumPrice(equivalentPrice);
 
-    const upscaled = await PriceChecker.upscalePrice(total);
+      const upscaled = items.length
+        ? await PriceChecker.upscalePrice(total, league)
+        : total;
 
-    setTotalSuggestedValue(upscaled);
+      setTotalSuggestedValue(upscaled);
 
-    return upscaled;
-  };
+      return upscaled;
+    },
+    [league],
+  );
 
   useEffect(() => {
     calculateTotalValue(items);
     calculateTotalSuggestedValue(items, priceSuggestions);
-  }, [items, priceSuggestions, elapsedTime]);
+  }, [
+    calculateTotalSuggestedValue,
+    calculateTotalValue,
+    items,
+    priceSuggestions,
+  ]);
 
   useEffect(() => {
     const calculateCurrencyPerHour = () => {
@@ -128,13 +144,12 @@ const LiveMonitor: React.FC<LiveMonitorProps> = ({
     };
 
     calculateCurrencyPerHour();
-  }, [totalListingValue, totalSuggestedValue, startTime]);
+  }, [elapsedTime, totalListingValue, totalSuggestedValue, startTime]);
 
   const numDrops = items.length;
 
   return (
     <div className="bg-gray-700 p-6 rounded-lg shadow-lg mb-4">
-      <p className="text-gray-300 mb-4">Time elapsed: {elapsedTime}</p>
       <div className="grid grid-cols-2 gap-4">
         <div>
           <p className="text-gray-400">Number of drops:</p>

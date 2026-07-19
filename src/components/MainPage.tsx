@@ -19,17 +19,16 @@ const MainPage: React.FC = () => {
     accountName,
     selectedLeague,
     items,
-    setItems,
     liveSearchItems,
-    setLiveSearchItems,
     stashTabs,
     selectedStash,
     searchTerm,
     setSearchTerm,
     isLiveMonitoring,
-    setIsLiveMonitoring,
+    isLiveMonitorStarting,
+    liveMonitorError,
+    toggleLiveMonitoring,
     isPriceChecking,
-    priceCheckProgress,
     priceEstimates,
     modifierSelections,
     setModifierSelection,
@@ -59,6 +58,21 @@ const MainPage: React.FC = () => {
         <p className="font-semibold">Public listing sync</p>
         <p className="mt-1 text-blue-200">{PUBLIC_LISTING_SCOPE_NOTICE}</p>
       </div>
+
+      {accountName && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-gray-700 bg-gray-800 p-3">
+          <LiveMonitorButton
+            isLiveMonitoring={isLiveMonitoring}
+            isStarting={isLiveMonitorStarting}
+            error={liveMonitorError}
+            onToggle={toggleLiveMonitoring}
+          />
+          <p className="text-sm text-gray-300">
+            Watches for newly published listings and checks their prices in the
+            background. Fairly priced items stay silent.
+          </p>
+        </div>
+      )}
 
       {items.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-4">
@@ -98,17 +112,6 @@ const MainPage: React.FC = () => {
           >
             {isPriceChecking ? "Checking Prices..." : "Price Check All"}
           </button>
-          <LiveMonitorButton
-            accountName={accountName}
-            league={selectedLeague}
-            items={items}
-            liveSearchItems={liveSearchItems}
-            isLiveMonitoring={isLiveMonitoring}
-            setIsLiveMonitoring={setIsLiveMonitoring}
-            setLiveSearchItems={setLiveSearchItems}
-            setItems={setItems}
-            onPriceCheck={priceCheckItem}
-          />
           <div className="flex-grow text-right">
             {filteredItems.length} items found
           </div>
@@ -127,16 +130,8 @@ const MainPage: React.FC = () => {
         <LiveMonitor
           items={liveSearchItems}
           priceSuggestions={priceEstimates}
+          league={selectedLeague}
         />
-      )}
-
-      {isPriceChecking && (
-        <div className="text-blue-500 mb-4">
-          Price checking in progress... Please wait.
-          {priceCheckProgress && (
-            <div className="text-sm mt-1">{priceCheckProgress}</div>
-          )}
-        </div>
       )}
 
       {errorMessage && <div className="text-red-500 mb-4">{errorMessage}</div>}

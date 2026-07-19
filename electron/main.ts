@@ -1,4 +1,11 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  nativeTheme,
+  Notification,
+  shell,
+} from "electron";
 //import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -18,6 +25,7 @@ import {
   isAllowedRendererOrigin,
   LOCAL_SERVER_HOST,
 } from "./app/proxySecurity";
+import { parsePriceAlertPayload } from "./app/priceAlert";
 
 const PORT = process.env.PORT || 7555;
 const execFileAsync = promisify(execFile);
@@ -174,6 +182,24 @@ ipcMain.handle("open-external-url", async (_event, url: unknown) => {
   }
 
   await openExternalUrl(url);
+});
+
+ipcMain.handle("show-price-alert", (_event, value: unknown) => {
+  const payload = parsePriceAlertPayload(value);
+  if (!payload) {
+    throw new Error("Invalid price alert payload");
+  }
+  if (!Notification.isSupported()) {
+    return false;
+  }
+
+  const notification = new Notification({
+    title: payload.title,
+    body: payload.body,
+  });
+  notification.on("click", focusMainWindow);
+  notification.show();
+  return true;
 });
 
 ipcMain.handle("poe-get-session", () => merchantHistoryService.getSession());

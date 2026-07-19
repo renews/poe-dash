@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useCallback,
+  useRef,
   Dispatch,
   SetStateAction,
 } from "react";
@@ -20,14 +21,13 @@ import {
 import { ModifierSelection, Poe2Item } from "../services/types";
 import { SyncAccount } from "../jobs/SyncAccount";
 import { RefreshAllItems } from "../jobs/RefreshAllItems";
-import {
-  getApiRequestProgressLabel,
-  getPriceCheckProgressLabel,
-  PriceCheckAllItems,
-} from "../jobs/PriceCheckAllItems";
+import { PriceCheckAllItems } from "../jobs/PriceCheckAllItems";
 import { Job } from "../jobs/Job";
 import { handleJob } from "../components/JobQueue";
 import { Leagues, League } from "../data/leagues";
+import { NewItemTracker } from "../services/NewItemTracker";
+import { alertOnMispricedItem } from "../services/PriceAlert";
+import { useLiveListingMonitor } from "../hooks/useLiveListingMonitor";
 
 export const MODIFIER_SELECTIONS_STORAGE_KEY = "modifierSelections";
 export const SELECTED_LEAGUE_STORAGE_KEY = "selectedLeague";
@@ -49,8 +49,16 @@ export function parseSavedAccountName(value: string | null) {
   return value?.trim() || "";
 }
 
+function getItemScope(accountName: string, league: League) {
+  return `${accountName.trim().toLowerCase()}:${league}`;
+}
+
 function isBooleanArray(value: unknown): value is boolean[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "boolean");
+}
+
+function isOptionalFiniteNumber(value: unknown): value is number | undefined {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value));
 }
 
 function isModifierSelection(value: unknown): value is ModifierSelection {
@@ -62,7 +70,11 @@ function isModifierSelection(value: unknown): value is ModifierSelection {
   return (
     isBooleanArray(selection.explicit) &&
     isBooleanArray(selection.implicit) &&
-    (selection.itemLevel === undefined || typeof selection.itemLevel === "boolean")
+    (selection.itemLevel === undefined || typeof selection.itemLevel === "boolean") &&
+    (selection.requiredLevel === undefined ||
+      typeof selection.requiredLevel === "boolean") &&
+    isOptionalFiniteNumber(selection.requiredLevelMin) &&
+    isOptionalFiniteNumber(selection.requiredLevelMax)
   );
 }
 
@@ -128,10 +140,11 @@ interface AppContextType {
   searchTerm: string;
   setSearchTerm: Dispatch<SetStateAction<string>>;
   isLiveMonitoring: boolean;
-  setIsLiveMonitoring: Dispatch<SetStateAction<boolean>>;
+  isLiveMonitorStarting: boolean;
+  liveMonitorError: string | null;
+  toggleLiveMonitoring: () => void;
   isPriceChecking: boolean;
   isSyncing: boolean;
-  priceCheckProgress: string;
   priceCheckCooldownMinutes: number;
   setPriceCheckCooldownMinutes: Dispatch<SetStateAction<number>>;
   modifierRangePercent: number;
@@ -212,10 +225,11 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   const [stashTabs, setStashTabs] = useState<string[]>([]);
   const [selectedStash, setSelectedStash] = useState<string>("All");
   const [searchTerm, setSearchTerm] = useState<string>("");
-  const [isLiveMonitoring, setIsLiveMonitoring] = useState<boolean>(false);
+  const [syncedAccountName, setSyncedAccountName] = useState(
+    getSavedAccountName,
+  );
   const [isPriceChecking, setIsPriceChecking] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [priceCheckProgress, setPriceCheckProgress] = useState("");
   const [priceCheckCooldownMinutes, setPriceCheckCooldownMinutes] = useState(
     getSavedPriceCheckCooldown,
   );
@@ -236,6 +250,22 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   >(null);
   const [isRefreshingCurrencyRates, setIsRefreshingCurrencyRates] =
     useState(false);
+  const [loadedItemsScope, setLoadedItemsScope] = useState<string | null>(null);
+  const newItemTracker = useRef(new NewItemTracker());
+  const backgroundPriceCheckQueue = useRef<Promise<void>>(Promise.resolve());
+  const activeItemScope = useRef(getItemScope(accountName, selectedLeague));
+  activeItemScope.current = getItemScope(syncedAccountName, selectedLeague);
+  const {
+    isMonitoring: isLiveMonitoring,
+    isStarting: isLiveMonitorStarting,
+    error: liveMonitorError,
+    toggle: toggleLiveMonitoring,
+  } = useLiveListingMonitor({
+    accountName: syncedAccountName,
+    league: selectedLeague,
+    setItems,
+    setLiveSearchItems,
+  });
 
   const refreshCurrencyRates = useCallback(async () => {
     setIsRefreshingCurrencyRates(true);
@@ -258,13 +288,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const priceCheckItems = async (itemsToCheck: Poe2Item[]) => {
-    let currentItemProgress = "";
     setIsPriceChecking(true);
-    setPriceCheckProgress(
-      itemsToCheck.length
-        ? `Preparing to check ${itemsToCheck.length} item${itemsToCheck.length === 1 ? "" : "s"}...`
-        : "",
-    );
     const priceCheck = new PriceCheckAllItems(
       itemsToCheck,
       true,
@@ -276,7 +300,6 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
 
     priceCheck.onCancel = async () => {
       setIsPriceChecking(false);
-      setPriceCheckProgress("");
     };
 
     priceCheck.onStep = async (progress) => {
@@ -284,18 +307,8 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       setPriceEstimates(PriceChecker.getCachedEstimates());
     };
 
-    priceCheck.onItemStart = ({ current, total, item }) => {
-      currentItemProgress = getPriceCheckProgressLabel(current, total, item);
-      setPriceCheckProgress(currentItemProgress);
-    };
-
-    priceCheck.onRequestState = (state) => {
-      const requestProgress = getApiRequestProgressLabel(state);
-      setPriceCheckProgress(
-        requestProgress
-          ? `${currentItemProgress} · ${requestProgress}`
-          : currentItemProgress,
-      );
+    priceCheck.onItemStart = () => {
+      setJobs((currentJobs) => [...currentJobs]);
     };
 
     try {
@@ -303,11 +316,11 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       setPriceEstimates(PriceChecker.getCachedEstimates());
     } finally {
       setIsPriceChecking(false);
-      setPriceCheckProgress("");
     }
   };
 
   const getItems = async (name: string) => {
+    setSyncedAccountName(name.trim());
     setIsSyncing(true);
     setErrorMessage("");
 
@@ -418,20 +431,84 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   const filteredItems = filterItems(items, selectedStash, searchTerm);
 
   useEffect(() => {
+    let cancelled = false;
+    const scope = getItemScope(accountName, selectedLeague);
+
     const getCachedItems = async (name: string) => {
       const accountItems = await Poe2Trade.getAllCachedAccountItems(
         name,
         selectedLeague,
       );
-      setItems(accountItems);
+      if (!cancelled) {
+        setItems(accountItems);
+        setLoadedItemsScope(scope);
+      }
     };
 
     setPriceEstimates(PriceChecker.getCachedEstimates());
+    setLoadedItemsScope(null);
 
     if (accountName) {
-      getCachedItems(accountName);
+      void getCachedItems(accountName);
+    } else {
+      setItems([]);
+      setLoadedItemsScope(scope);
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [accountName, selectedLeague]);
+
+  useEffect(() => {
+    const scope = getItemScope(syncedAccountName, selectedLeague);
+    if (
+      !syncedAccountName ||
+      accountName.trim().toLowerCase() !== syncedAccountName.toLowerCase() ||
+      loadedItemsScope !== scope
+    ) {
+      return;
+    }
+
+    const newItems = newItemTracker.current.update(scope, items, isSyncing);
+    for (const item of newItems) {
+      const selection = modifierSelections[item.id];
+      const rangePercent = modifierRangePercent;
+
+      backgroundPriceCheckQueue.current = backgroundPriceCheckQueue.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (activeItemScope.current !== scope) {
+            return;
+          }
+
+          try {
+            const estimate = await PriceChecker.estimateItemPrice(
+              item,
+              selectedLeague,
+              selection,
+              rangePercent,
+            );
+            setPriceEstimates(PriceChecker.getCachedEstimates());
+            await alertOnMispricedItem(item, estimate, selectedLeague);
+          } catch (error) {
+            console.error(
+              `Automatic price check failed for ${item.item?.name || item.item?.typeLine || item.id}`,
+              error,
+            );
+          }
+        });
+    }
+  }, [
+    accountName,
+    isSyncing,
+    items,
+    loadedItemsScope,
+    modifierRangePercent,
+    modifierSelections,
+    selectedLeague,
+    syncedAccountName,
+  ]);
 
   useEffect(() => {
     void refreshCurrencyRates();
@@ -484,10 +561,11 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     searchTerm,
     setSearchTerm,
     isLiveMonitoring,
-    setIsLiveMonitoring,
+    isLiveMonitorStarting,
+    liveMonitorError,
+    toggleLiveMonitoring,
     isPriceChecking,
     isSyncing,
-    priceCheckProgress,
     priceCheckCooldownMinutes,
     setPriceCheckCooldownMinutes,
     modifierRangePercent,
