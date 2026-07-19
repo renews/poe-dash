@@ -21,6 +21,10 @@ import { createTradeSearchUrl } from "../services/externalLinks";
 import { getListingSinceLabel } from "../services/listing";
 import { formFieldClassName } from "./formStyles";
 import { ChevronDown } from "lucide-react";
+import {
+  getItemBlockExpanded,
+  setItemBlockExpanded,
+} from "../services/itemBlockState";
 
 export const ItemNameWithRarity: React.FC<{
   item: Poe2Item;
@@ -189,7 +193,9 @@ export function PoeListItem(props: {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [isPriceChecking, setIsPriceChecking] = useState(false);
   const [priceCheckError, setPriceCheckError] = useState<string | null>(null);
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(() =>
+    getItemBlockExpanded(item.id),
+  );
   const gemItem = isGemItem(item);
   const requiredLevel = gemItem ? undefined : getItemRequiredLevel(item);
   const defaultRequiredLevelRange = gemItem
@@ -245,6 +251,12 @@ export function PoeListItem(props: {
 
   const copyNameToClipboard = () => {
     navigator.clipboard.writeText(item.item.name || item.item.typeLine);
+  };
+
+  const toggleItemBlock = () => {
+    const expanded = !isExpanded;
+    setIsExpanded(expanded);
+    setItemBlockExpanded(item.id, expanded);
   };
 
   const openSearchInDefaultBrowser = async () => {
@@ -323,7 +335,7 @@ export function PoeListItem(props: {
             <ItemNameWithRarity
               item={item}
               expanded={isExpanded}
-              onToggle={() => setIsExpanded((expanded) => !expanded)}
+              onToggle={toggleItemBlock}
             />
             <p className="text-sm text-gray-400 text-left">
               {!item.item.name ? item.item.baseType : item.item.typeLine}
