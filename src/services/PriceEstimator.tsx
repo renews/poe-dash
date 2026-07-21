@@ -29,6 +29,7 @@ import {
   PricePosition,
 } from "./pricePosition";
 import { getItemCategory } from "./itemCategory";
+import { getListingSuggestionPriceFactor } from "./listingPricePolicy";
 
 function rethrowIfRequestCancelled(
   error: unknown,
@@ -49,6 +50,7 @@ export type ComparablePrice = Price & {
 };
 export type Estimate = {
   checkedAt?: number;
+  listingAgeAdjustmentFactor?: number;
   matchesCurrentPrice?: boolean;
   price: Price;
   stdDev: Price;
@@ -772,6 +774,23 @@ class PriceEstimator {
       tradeSearch?.strategy === "one-mod-relaxed"
     ) {
       estimate.confidence = "low";
+    }
+
+    const listingAgeAdjustmentFactor = getListingSuggestionPriceFactor(
+      item.listing?.indexed,
+    );
+    estimate.listingAgeAdjustmentFactor = listingAgeAdjustmentFactor;
+    if (listingAgeAdjustmentFactor !== 1) {
+      const precisePrice = getPrecisePrice(estimate.price);
+      const preciseSpread = getPrecisePrice(estimate.stdDev);
+      estimate.price = {
+        amount: precisePrice.amount * listingAgeAdjustmentFactor,
+        currency: precisePrice.currency,
+      };
+      estimate.stdDev = {
+        amount: preciseSpread.amount * listingAgeAdjustmentFactor,
+        currency: preciseSpread.currency,
+      };
     }
 
     estimate.price = await this.upscalePrice(estimate.price, itemLeague, options);

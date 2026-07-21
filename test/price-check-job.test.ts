@@ -47,6 +47,63 @@ test("uses only the current item name as the price-check job description", async
   expect(priceCheck.description).toBe("Fiery Buckler");
 });
 
+test("refreshes a legacy cached suggestion when a listing crosses 13 days", async () => {
+  const originalEstimateItemPrice = PriceChecker.estimateItemPrice;
+  const originalGetCachedEstimates = PriceChecker.getCachedEstimates;
+  const originalMatchesModifierSelection =
+    PriceChecker.matchesModifierSelection;
+  const oldItem = {
+    id: "old-item",
+    listing: {
+      indexed: new Date(
+        Date.now() - 13 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      price: { amount: 2, currency: "chaos" },
+      stash: { name: "Shop", x: 0, y: 0 },
+    },
+    item: {
+      id: "old-item",
+      name: "Doom Loop",
+      typeLine: "Fine Ring",
+      baseType: "Fine Ring",
+    },
+  } as Poe2Item;
+  const cachedEstimate = {
+    checkedAt: Date.now(),
+    price: { amount: 8, currency: "chaos" },
+    stdDev: { amount: 2, currency: "chaos" },
+    comparables: [],
+  } as Estimate;
+  const refreshedEstimate = {
+    ...cachedEstimate,
+    price: { amount: 4, currency: "chaos" },
+    stdDev: { amount: 1, currency: "chaos" },
+    listingAgeAdjustmentFactor: 0.5,
+  } as Estimate;
+  let estimateCalls = 0;
+
+  PriceChecker.getCachedEstimates = () => ({
+    [oldItem.id]: cachedEstimate,
+  });
+  PriceChecker.matchesModifierSelection = () => true;
+  PriceChecker.estimateItemPrice = async () => {
+    estimateCalls += 1;
+    return refreshedEstimate;
+  };
+
+  try {
+    const priceCheck = new PriceCheckAllItems([oldItem]);
+    const progress = await priceCheck._task().next();
+
+    expect(estimateCalls).toBe(1);
+    expect(progress.value?.data).toBe(refreshedEstimate);
+  } finally {
+    PriceChecker.estimateItemPrice = originalEstimateItemPrice;
+    PriceChecker.getCachedEstimates = originalGetCachedEstimates;
+    PriceChecker.matchesModifierSelection = originalMatchesModifierSelection;
+  }
+});
+
 test("clears a failed item's error before checking the next item", async () => {
   const priceChecker = PriceChecker as unknown as {
     estimateItemPrice: () => Promise<Estimate>;

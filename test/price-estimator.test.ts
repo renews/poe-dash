@@ -26,6 +26,7 @@ import {
   formatDateTime,
   formatPriceAmount,
 } from "../src/services/types";
+import { AGED_LISTING_PRICE_REDUCTION_FACTOR } from "../src/services/listingPricePolicy";
 import { Poe2Trade } from "../src/services/poe2trade";
 import { Poe2Scout } from "../src/services/Poe2ScoutClient";
 
@@ -757,6 +758,112 @@ test("uses the Search result set for price estimates", async () => {
     PriceChecker.findMatchingItem = originalFindMatchingItem;
     PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
     PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+    PriceChecker.matchesCurrentPrice = originalMatchesCurrentPrice;
+    PriceChecker.cachePriceEstimate = originalCachePriceEstimate;
+  }
+});
+
+test("halves an old listing suggestion and spread before currency promotion", async () => {
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const originalPriceEstimate = PriceChecker.priceEstimate;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  const originalMatchesCurrentPrice = PriceChecker.matchesCurrentPrice;
+  const originalCachePriceEstimate = PriceChecker.cachePriceEstimate;
+  const comparable = {
+    amount: 100,
+    currency: "exalted",
+    itemId: "matching-id",
+    listedAmount: 1,
+    listedCurrency: "divine",
+  };
+  const item = {
+    id: "old-item",
+    listing: {
+      indexed: new Date(
+        Date.now() - 13 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      price: { amount: 80, currency: "exalted" },
+      stash: { name: "Shop", x: 0, y: 0 },
+    },
+    item: {
+      id: "old-item",
+      baseType: "Fine Ring",
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+  const pricesBeforePromotion: Array<{ amount: number; currency: string }> = [];
+  let matchedSuggestion: { amount: number; currency: string } | undefined;
+  let matchedSpread: { amount: number; currency: string } | undefined;
+  let cachedEstimate: Estimate | undefined;
+
+  PriceChecker.findMatchingItem = async () => ({
+    id: "search-id",
+    complexity: 0,
+    result: ["matching-id"],
+    total: 1,
+  });
+  PriceChecker.getPricesForItemIds = async () => [comparable];
+  PriceChecker.fetchManyExchangeRates = async () => {};
+  PriceChecker.priceEstimate = () => ({
+    price: { amount: 100, currency: "exalted" },
+    stdDev: { amount: 20, currency: "exalted" },
+    comparables: [comparable],
+    confidence: "high",
+    method: "median",
+  });
+  PriceChecker.upscalePrice = async (price) => {
+    pricesBeforePromotion.push({
+      amount: price.amount,
+      currency: price.currency,
+    });
+    return price;
+  };
+  PriceChecker.matchesCurrentPrice = async (
+    _item,
+    suggestedPrice,
+    _league,
+    _options,
+    spread,
+  ) => {
+    matchedSuggestion = suggestedPrice;
+    matchedSpread = spread;
+    return false;
+  };
+  PriceChecker.cachePriceEstimate = (_itemId, estimate) => {
+    cachedEstimate = estimate;
+  };
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(item, "Standard");
+
+    expect(pricesBeforePromotion).toEqual([
+      { amount: 50, currency: "exalted" },
+      { amount: 10, currency: "exalted" },
+    ]);
+    expect(matchedSuggestion).toEqual({
+      amount: 50,
+      currency: "exalted",
+    });
+    expect(matchedSpread).toEqual({ amount: 10, currency: "exalted" });
+    expect(estimate.listingAgeAdjustmentFactor).toBe(
+      AGED_LISTING_PRICE_REDUCTION_FACTOR,
+    );
+    expect(cachedEstimate).toBe(estimate);
+    expect(estimate.comparables[0]).toMatchObject({
+      amount: 100,
+      listedAmount: 1,
+      listedCurrency: "divine",
+    });
+    expect(item.listing.price).toEqual({ amount: 80, currency: "exalted" });
+  } finally {
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    PriceChecker.priceEstimate = originalPriceEstimate;
     PriceChecker.upscalePrice = originalUpscalePrice;
     PriceChecker.matchesCurrentPrice = originalMatchesCurrentPrice;
     PriceChecker.cachePriceEstimate = originalCachePriceEstimate;

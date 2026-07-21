@@ -8,6 +8,7 @@ import {
 } from "../services/PriceEstimator";
 import { ModifierSelection, Poe2Item } from "../services/types";
 import { ApiRequestState } from "../services/ApiRequestQueue";
+import { hasCurrentListingSuggestionPriceFactor } from "../services/listingPricePolicy";
 
 export type PriceCheckItemProgress = {
   current: number;
@@ -81,6 +82,10 @@ export class PriceCheckAllItems extends Job<Estimate> {
         cachedEstimate &&
         this.skipAlreadyChecked &&
         isEstimateFresh(cachedEstimate, this.cooldownMinutes) &&
+        hasCurrentListingSuggestionPriceFactor(
+          item.listing?.indexed,
+          cachedEstimate.listingAgeAdjustmentFactor,
+        ) &&
         PriceChecker.matchesModifierSelection(
           item,
           cachedEstimate,
