@@ -1,10 +1,12 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   ipcMain,
   nativeTheme,
   Notification,
   shell,
+  systemPreferences,
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
@@ -33,6 +35,19 @@ import {
   isWindowControlAction,
   performWindowControl,
 } from "./app/windowControls";
+import {
+  getForegroundWindowInfo,
+  getLivePriceCheckPlatformIssue,
+} from "./app/foregroundWindow";
+import {
+  capturePoeItemText,
+  isPathOfExileForegroundWindow,
+} from "./app/priceCheckClipboard";
+import {
+  DEFAULT_PRICE_CHECK_SHORTCUT_BINDING,
+  parsePriceCheckShortcut,
+  type PriceCheckShortcutBinding,
+} from "../src/services/priceCheckShortcut";
 
 const PORT = process.env.PORT || 7555;
 const execFileAsync = promisify(execFile);
@@ -69,6 +84,20 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
 
 let win: BrowserWindow | null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+let activePriceCheckCapture: Promise<void> | undefined;
+let pressPoeItemCopy: (() => Promise<void>) | undefined;
+let stopPoeCopyKeyboard: (() => void) | undefined;
+let updatePoeCopyKeyboardShortcut:
+  | ((shortcut: PriceCheckShortcutBinding) => void)
+  | undefined;
+let activePriceCheckShortcut = DEFAULT_PRICE_CHECK_SHORTCUT_BINDING;
+let pendingPriceCheckItemText: string | undefined;
+let priceCheckRegistrationPromise: Promise<void> | undefined;
+let priceCheckShortcutStatus = {
+  registered: false,
+  shortcut: activePriceCheckShortcut.label,
+  error: "The desktop shortcut has not been registered.",
+};
 
 async function openExternalUrl(url: string) {
   if (process.platform === "linux") {
@@ -132,6 +161,15 @@ function createWindow() {
     }
   });
 
+  createdWindow.webContents.on("did-finish-load", () => {
+    if (!pendingPriceCheckItemText || createdWindow.isDestroyed()) {
+      return;
+    }
+    const itemText = pendingPriceCheckItemText;
+    pendingPriceCheckItemText = undefined;
+    createdWindow.webContents.send("price-check-item-copied", itemText);
+  });
+
   if (process.env.POE_DASH_OPEN_DEVTOOLS === "1") {
     createdWindow.webContents.openDevTools();
   }
@@ -178,6 +216,134 @@ function focusMainWindow() {
   return true;
 }
 
+function notifyPriceCheckFailure(message: string) {
+  if (!Notification.isSupported()) {
+    return;
+  }
+  new Notification({ title: "Price check failed", body: message }).show();
+}
+
+function deliverCapturedPriceCheckItem(itemText: string) {
+  pendingPriceCheckItemText = itemText;
+  let createdWindow = false;
+  if (!win || win.isDestroyed()) {
+    createWindow();
+    createdWindow = true;
+  }
+  focusMainWindow();
+
+  if (win && !createdWindow && !win.webContents.isLoadingMainFrame()) {
+    pendingPriceCheckItemText = undefined;
+    win.webContents.send("price-check-item-copied", itemText);
+  }
+}
+
+async function captureLivePriceCheckItem() {
+  let foregroundWindow: Awaited<ReturnType<typeof getForegroundWindowInfo>>;
+  try {
+    foregroundWindow = await getForegroundWindowInfo();
+  } catch (error) {
+    console.warn("Unable to identify the foreground window", error);
+    notifyPriceCheckFailure(
+      "Poe Dash could not verify that Path of Exile is active. Manual paste is still available.",
+    );
+    return;
+  }
+  if (!isPathOfExileForegroundWindow(foregroundWindow)) {
+    return;
+  }
+
+  try {
+    const itemText = await capturePoeItemText({
+      readText: () => clipboard.readText(),
+      writeText: (text) => clipboard.writeText(text),
+      pressCopy: () => {
+        if (!pressPoeItemCopy) {
+          throw new Error("Native keyboard access is unavailable.");
+        }
+        return pressPoeItemCopy();
+      },
+    });
+    deliverCapturedPriceCheckItem(itemText);
+  } catch (error) {
+    notifyPriceCheckFailure(
+      error instanceof Error
+        ? error.message
+        : "No Path of Exile item was copied.",
+    );
+  }
+}
+
+async function registerLivePriceCheckShortcut() {
+  try {
+    const platformIssue = getLivePriceCheckPlatformIssue();
+    if (platformIssue) {
+      priceCheckShortcutStatus = {
+        registered: false,
+        shortcut: activePriceCheckShortcut.label,
+        error: platformIssue,
+      };
+      return;
+    }
+
+    if (process.platform === "linux") {
+      try {
+        await execFileAsync("xdotool", ["--version"]);
+      } catch {
+        priceCheckShortcutStatus = {
+          registered: false,
+          shortcut: activePriceCheckShortcut.label,
+          error:
+            "Live price check requires xdotool on Linux. Manual paste is still available.",
+        };
+        return;
+      }
+    }
+
+    if (
+      process.platform === "darwin" &&
+      !systemPreferences.isTrustedAccessibilityClient(true)
+    ) {
+      priceCheckShortcutStatus = {
+        registered: false,
+        shortcut: activePriceCheckShortcut.label,
+        error: "Grant Poe Dash Accessibility access, then restart the app.",
+      };
+      return;
+    }
+
+    const keyboard = await import("./app/poeCopyKeyboard");
+    pressPoeItemCopy = keyboard.pressPoeItemCopy;
+    updatePoeCopyKeyboardShortcut = keyboard.updatePoeCopyKeyboardShortcut;
+    keyboard.startPoeCopyKeyboard(() => {
+      if (activePriceCheckCapture) {
+        return;
+      }
+      activePriceCheckCapture = captureLivePriceCheckItem().finally(() => {
+        activePriceCheckCapture = undefined;
+      });
+    }, activePriceCheckShortcut);
+    stopPoeCopyKeyboard = keyboard.stopPoeCopyKeyboard;
+    priceCheckShortcutStatus = {
+      registered: true,
+      shortcut: activePriceCheckShortcut.label,
+      error: "",
+    };
+  } catch (error) {
+    pressPoeItemCopy = undefined;
+    stopPoeCopyKeyboard = undefined;
+    updatePoeCopyKeyboardShortcut = undefined;
+    priceCheckShortcutStatus = {
+      registered: false,
+      shortcut: activePriceCheckShortcut.label,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Native keyboard access could not be started.",
+    };
+  }
+}
+
 // Quit when all windows are closed, except on macOS. There, it's common
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
@@ -185,6 +351,13 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
     win = null;
+  }
+});
+
+app.on("will-quit", () => {
+  if (stopPoeCopyKeyboard) {
+    stopPoeCopyKeyboard();
+    stopPoeCopyKeyboard = undefined;
   }
 });
 
@@ -259,6 +432,30 @@ ipcMain.handle("show-price-alert", (event, value: unknown) => {
   return true;
 });
 
+ipcMain.handle("price-check-shortcut-status", async (event) => {
+  requireTrustedIpcSender(event);
+  await priceCheckRegistrationPromise;
+  return priceCheckShortcutStatus;
+});
+
+ipcMain.handle("price-check-shortcut-update", async (event, value: unknown) => {
+  requireTrustedIpcSender(event);
+  const shortcut =
+    typeof value === "string" ? parsePriceCheckShortcut(value) : undefined;
+  if (!shortcut) {
+    throw new Error("Invalid live price check shortcut");
+  }
+
+  activePriceCheckShortcut = shortcut;
+  await priceCheckRegistrationPromise;
+  updatePoeCopyKeyboardShortcut?.(shortcut);
+  priceCheckShortcutStatus = {
+    ...priceCheckShortcutStatus,
+    shortcut: shortcut.label,
+  };
+  return priceCheckShortcutStatus;
+});
+
 ipcMain.handle("poe-get-session", (event) => {
   requireTrustedIpcSender(event);
   return merchantHistoryService.getSession();
@@ -294,7 +491,10 @@ wss.on("connection", (ws, request) => {
 });
 
 if (hasSingleInstanceLock) {
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    createWindow();
+    priceCheckRegistrationPromise = registerLivePriceCheckShortcut();
+  });
   server.listen(Number(PORT), LOCAL_SERVER_HOST, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
   });

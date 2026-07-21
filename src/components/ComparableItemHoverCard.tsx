@@ -11,10 +11,12 @@ import {
   formatItemMod,
   formatPriceAmount,
   getItemModifierHash,
+  getItemModifierTierLabels,
   getModifierDisplayKind,
   Poe2Item,
 } from "../services/types";
 import { modifierColorClass } from "./formStyles";
+import { ModifierTierBadges } from "./ModifierTierBadges";
 
 interface ComparableItemDetailsProps {
   item: Poe2Item;
@@ -46,7 +48,12 @@ export const ComparableItemTooltipContent: React.FC<
           className={`${modifierColorClass(kind)} ${isUsed ? "" : "line-through opacity-60"}`}
           title={isUsed ? kind : `${kind} · not used in search`}
         >
-          {formatItemMod(mod)}
+          <span className="modifier-line">
+            <span>{formatItemMod(mod)}</span>
+            <ModifierTierBadges
+              tiers={getItemModifierTierLabels(item, section, index, mod)}
+            />
+          </span>
         </li>
       );
     });

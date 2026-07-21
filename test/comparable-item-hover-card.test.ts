@@ -22,7 +22,18 @@ test("renders the full comparable item details and marks unused modifiers", () =
         { name: "Physical Damage", values: [["24-44", 0]] },
       ],
       implicitMods: ["34% increased Projectile Speed with this Weapon"],
-      explicitMods: ["Adds 12 to 26 Physical Damage", "+100 to Evasion Rating"],
+      explicitMods: [
+        {
+          description: "Adds 12 to 26 Physical Damage",
+          hash: "explicit.stat_used",
+          mods: [{ tier: "P1" }],
+        },
+        {
+          description: "+100 to Evasion Rating",
+          hash: "explicit.stat_unused",
+          mods: [{ tier: "S1" }],
+        },
+      ],
       sockets: [{ group: 0 }],
       extended: {
         mods: { explicit: [{ tier: "P1" }, { tier: "S1" }] },
@@ -51,6 +62,10 @@ test("renders the full comparable item details and marks unused modifiers", () =
   expect(markup).toContain("Physical Damage: 24-44");
   expect(markup).toContain("Implicit");
   expect(markup).toContain("Adds 12 to 26 Physical Damage");
+  expect(markup).toContain('aria-label="Prefix tier 1"');
+  expect(markup).toContain(">P1<");
+  expect(markup).toContain('aria-label="Suffix tier 1"');
+  expect(markup).toContain(">S1<");
   expect(markup).toContain('title="suffix · not used in search"');
   expect(markup).toContain("line-through opacity-60");
   expect(markup).toContain("Sockets: 1");

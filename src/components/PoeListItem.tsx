@@ -306,7 +306,8 @@ export function PoeListItem(props: {
               priceEstimate.search?.requiredLevelMax !== undefined
                 ? ` · required level ${priceEstimate.search.requiredLevelMin}–${priceEstimate.search.requiredLevelMax}`
                 : ""}
-              {priceEstimate.search?.strategy === "one-mod-relaxed"
+              {priceEstimate.search?.strategy === "one-mod-relaxed" ||
+              priceEstimate.search?.strategy === "modifier-count-relaxed"
                 ? ` · fallback: at least ${priceEstimate.search.minimumModifierCount} of ${priceEstimate.search.selectedModifierCount} selected modifiers`
                 : ""}
             </p>

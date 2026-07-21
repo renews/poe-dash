@@ -24,6 +24,19 @@ declare namespace NodeJS {
 // Used in Renderer process, expose in `preload.ts`
 interface Window {
   desktopApi?: {
+    priceCheck?: {
+      getShortcutStatus: () => Promise<{
+        registered: boolean;
+        shortcut: string;
+        error?: string;
+      }>;
+      setShortcut: (shortcut: string) => Promise<{
+        registered: boolean;
+        shortcut: string;
+        error?: string;
+      }>;
+      onItemCopied: (callback: (itemText: string) => void) => () => void;
+    };
     merchantHistory: {
       getSession: () => Promise<unknown>;
       login: () => Promise<unknown>;

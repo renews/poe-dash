@@ -3,11 +3,12 @@ import {
   Coins,
   History as HistoryIcon,
   MessageSquare,
+  ScanSearch,
   Settings,
   Tags,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
-import appIcon from "../assets/poe-dash-brand-seal.png";
+import divineOrbLogo from "../assets/divine-orb-logo.svg";
 import { canViewSaleHistory } from "../appNavigation";
 
 interface PrimaryNavigationProps {
@@ -23,7 +24,11 @@ export const PrimaryNavigation: React.FC<PrimaryNavigationProps> = ({
     <header className="product-navigation">
       <NavLink to="/" end className="product-brand" aria-label="Poe Dash home">
         <span className="product-brand__seal">
-          <img src={appIcon} alt="" />
+          <img
+            src={divineOrbLogo}
+            alt=""
+            data-brand-mark="official-divine-orb"
+          />
         </span>
         <span className="product-brand__copy">
           <strong>POE DASH</strong>
@@ -34,6 +39,10 @@ export const PrimaryNavigation: React.FC<PrimaryNavigationProps> = ({
         <NavLink to="/" end className={navLinkClassName}>
           <Tags aria-hidden="true" />
           <span>Your Sales</span>
+        </NavLink>
+        <NavLink to="/price-check" className={navLinkClassName}>
+          <ScanSearch aria-hidden="true" />
+          <span>Price Check</span>
         </NavLink>
         <NavLink
           to="/messages"

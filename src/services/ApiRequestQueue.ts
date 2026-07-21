@@ -65,21 +65,21 @@ export class ApiRequestQueue {
   ) {
     try {
       this.throwIfAborted(options.signal);
-      const intervalDelay = Math.max(
-        0,
-        this.lastStartedAt + this.minIntervalMs - this.now(),
-      );
-      if (intervalDelay > 0) {
-        options.onState?.({
-          status: "waiting",
-          attempt: 0,
-          delayMs: intervalDelay,
-        });
-        await this.wait(intervalDelay, options.signal);
-      }
-
       for (let attempt = 0; ; attempt += 1) {
         this.throwIfAborted(options.signal);
+        const intervalDelay = Math.max(
+          0,
+          this.lastStartedAt + this.minIntervalMs - this.now(),
+        );
+        if (intervalDelay > 0) {
+          options.onState?.({
+            status: "waiting",
+            attempt,
+            delayMs: intervalDelay,
+          });
+          await this.wait(intervalDelay, options.signal);
+        }
+
         this.lastStartedAt = this.now();
         options.onState?.({ status: "running", attempt: attempt + 1 });
 

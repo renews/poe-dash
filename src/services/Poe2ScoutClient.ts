@@ -1,9 +1,13 @@
 import axios from "axios";
 import { ApiRequestQueue, ApiRequestRunOptions } from "./ApiRequestQueue";
+import { getItemCategory } from "./itemCategory";
 import { Price, Poe2Item } from "./types";
 
 const POE2_SCOUT_CACHE_MS = 60 * 60 * 1000;
 const POE2_SCOUT_HISTORY_COUNT = 24;
+// Scout history is sampled hourly. After a full day without a usable sample,
+// prefer live trade fallbacks instead of short-circuiting on stale market data.
+export const POE2_SCOUT_MAX_OBSERVATION_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface Poe2ScoutItem {
   ItemId: number;
@@ -52,6 +56,33 @@ function normalizeLookupText(value?: string | null) {
   return value?.trim().toLowerCase() || "";
 }
 
+function isFreshPoe2ScoutObservation(updatedAt: number, now: number) {
+  return (
+    Number.isFinite(updatedAt) &&
+    updatedAt <= now &&
+    now - updatedAt <= POE2_SCOUT_MAX_OBSERVATION_AGE_MS
+  );
+}
+
+function getCompatibleScoutCategoryIds(item: Poe2Item) {
+  const category = getItemCategory(item, item.item?.frameType === 4);
+  if (category === "currency.rune") {
+    return ["runes"];
+  }
+
+  const rootCategory = category?.split(".")[0];
+  if (
+    rootCategory &&
+    ["accessory", "armour", "flask", "jewel", "weapon"].includes(
+      rootCategory,
+    )
+  ) {
+    return [rootCategory];
+  }
+
+  return [];
+}
+
 export function getPoe2ScoutLookupTerms(item: Poe2Item) {
   const rarity = item.item?.rarity?.trim().toLowerCase();
   const frameType = item.item?.frameType;
@@ -73,20 +104,37 @@ export function findPoe2ScoutItem(
   items: Poe2ScoutItem[],
   item: Poe2Item,
 ) {
-  const terms = getPoe2ScoutLookupTerms(item).map(normalizeLookupText);
+  let terms = getPoe2ScoutLookupTerms(item).map(normalizeLookupText);
   if (!terms.length) {
     return undefined;
   }
 
-  for (const field of ["Name", "Type", "Text"] as const) {
-    for (const term of terms) {
-      const match = items.find(
-        (candidate) => normalizeLookupText(candidate[field]) === term,
-      );
-      if (match) {
-        return match;
-      }
+  const rarity = normalizeLookupText(item.item?.rarity);
+  if (item.item?.frameType === 3 || rarity === "unique") {
+    const uniqueName = normalizeLookupText(item.item?.name);
+    if (!uniqueName) {
+      return undefined;
     }
+
+    terms = [uniqueName];
+  }
+
+  const exactMatches = items.filter((candidate) =>
+    (["Name", "Type", "Text"] as const).some((field) =>
+      terms.includes(normalizeLookupText(candidate[field])),
+    ),
+  );
+  const compatibleCategoryIds = getCompatibleScoutCategoryIds(item);
+  const compatibleMatches = compatibleCategoryIds.length
+    ? exactMatches.filter((candidate) =>
+        compatibleCategoryIds.includes(
+          normalizeLookupText(candidate.CategoryApiId),
+        ),
+      )
+    : exactMatches;
+
+  if (compatibleMatches.length === 1) {
+    return compatibleMatches[0];
   }
 
   return undefined;
@@ -95,6 +143,7 @@ export function findPoe2ScoutItem(
 export function createPoe2ScoutValuation(
   item: Poe2ScoutItem,
   response: Poe2ScoutHistoryResponse,
+  now = Date.now(),
 ): Poe2ScoutMarketValuation | undefined {
   const history = (response.PriceHistory || [])
     .map((entry) => ({
@@ -107,12 +156,13 @@ export function createPoe2ScoutValuation(
         Number.isFinite(entry.amount) &&
         entry.amount > 0 &&
         Number.isFinite(entry.quantity) &&
-        entry.quantity >= 0 &&
-        Number.isFinite(entry.updatedAt),
+        entry.quantity > 0 &&
+        Number.isFinite(entry.updatedAt) &&
+        entry.updatedAt <= now,
     )
     .sort((left, right) => left.updatedAt - right.updatedAt);
   const latest = history.at(-1);
-  if (!latest) {
+  if (!latest || !isFreshPoe2ScoutObservation(latest.updatedAt, now)) {
     return undefined;
   }
 
@@ -130,11 +180,20 @@ export function createPoe2ScoutValuation(
 export function createPoe2ScoutCurrentValuation(
   item: Poe2ScoutItem,
   currency: string,
-  updatedAt = Date.now(),
+  updatedAt?: number,
+  quantity = 0,
+  now = Date.now(),
 ): Poe2ScoutMarketValuation | undefined {
   const amount = Number(item.CurrentPrice);
   const normalizedCurrency = currency.trim().toLowerCase();
-  if (!Number.isFinite(amount) || amount <= 0 || !normalizedCurrency) {
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    !normalizedCurrency ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0 ||
+    !isFreshPoe2ScoutObservation(Number(updatedAt), now)
+  ) {
     return undefined;
   }
 
@@ -142,8 +201,8 @@ export function createPoe2ScoutCurrentValuation(
     itemId: item.ItemId,
     itemName: item.Name || item.Text || item.Type || "Item",
     price: { amount, currency: normalizedCurrency },
-    quantity: 0,
-    updatedAt,
+    quantity,
+    updatedAt: Number(updatedAt),
     history: [],
     method: "current-snapshot",
   };
@@ -189,9 +248,14 @@ export class Poe2ScoutClient {
 
     const cacheKey = `${league}:${marketItem.ItemId}`;
     const cached = this.getCached(this.valuationCache, cacheKey);
-    if (cached) {
+    if (
+      cached &&
+      cached.quantity > 0 &&
+      isFreshPoe2ScoutObservation(cached.updatedAt, Date.now())
+    ) {
       return cached;
     }
+    this.valuationCache.delete(cacheKey);
 
     const params = new URLSearchParams({
       LogCount: POE2_SCOUT_HISTORY_COUNT.toString(),

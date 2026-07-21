@@ -108,6 +108,70 @@ test("renders one compact price row per item inside stash accordions", () => {
   );
 });
 
+test("shows the level of a synced gem from its item properties", () => {
+  const gem = createItem("gem", "Shop", "Spark", 1, "divine");
+  gem.item.rarity = "Gem";
+  gem.item.frameType = 4;
+  gem.item.properties = [
+    { name: "Level", values: [["20 (Max)", 0]], displayMode: 0 },
+  ];
+
+  const markup = renderToStaticMarkup(
+    createElement(CompactItemList, {
+      items: [gem],
+      priceEstimates: {},
+      modifierSelections: {},
+      onPriceCheck: async () => {},
+      onModifierSelectionChange: () => {},
+      onStashPriceCheck: async () => {},
+      isPriceChecking: false,
+    }),
+  );
+
+  expect(markup).toContain("Gem level 20");
+});
+
+test("distinguishes failed price checks from items that were never checked", () => {
+  const failed = createItem("failed", "Shop", "Failed Ring", 2, "chaos");
+  const unchecked = createItem(
+    "unchecked",
+    "Shop",
+    "Unchecked Ring",
+    3,
+    "chaos",
+  );
+
+  const markup = renderToStaticMarkup(
+    createElement(CompactItemList, {
+      items: [failed, unchecked],
+      priceEstimates: {
+        failed: {
+          price: { amount: 4, currency: "chaos" },
+        } as Estimate,
+      },
+      priceCheckErrors: {
+        failed: "No comparable listings found in the selected league.",
+      },
+      modifierSelections: {},
+      onPriceCheck: async () => {},
+      onModifierSelectionChange: () => {},
+      onStashPriceCheck: async () => {},
+      isPriceChecking: false,
+    }),
+  );
+
+  expect(markup).toContain('data-price-status="failed"');
+  expect(markup).toContain(">Unavailable<");
+  expect(markup).toContain(">Failed<");
+  expect(markup).toContain(">Retry<");
+  expect(markup).toContain(
+    'title="No comparable listings found in the selected league."',
+  );
+  expect(markup).toContain('data-price-status="unchecked"');
+  expect(markup).toContain("Not checked");
+  expect(markup).toContain(">Unchecked<");
+});
+
 test("colors only the age cell when a listing becomes aging or stale", () => {
   const aging = createItem("aging", "Shop", "Aging Item", 2, "chaos");
   const stale = createItem("stale", "Shop", "Stale Item", 2, "chaos");
@@ -235,8 +299,16 @@ test("shares the detailed modifier editor with the compact view", async () => {
   item.item.ilvl = 82;
   item.item.implicitMods = ["+10 to maximum Life"];
   item.item.explicitMods = [
-    "+25 to maximum Energy Shield",
-    "+20% to Fire Resistance",
+    {
+      description: "+25 to maximum Energy Shield",
+      hash: "energy-shield",
+      mods: [{ tier: "P3" }],
+    },
+    {
+      description: "+20% to Fire Resistance",
+      hash: "fire-resistance",
+      mods: [{ tier: "S2" }],
+    },
   ];
 
   const markup = renderToStaticMarkup(
@@ -266,10 +338,37 @@ test("shares the detailed modifier editor with the compact view", async () => {
   expect(markup).toContain("+10 to maximum Life");
   expect(markup).toContain("Explicit Mods:");
   expect(markup).toContain("+20% to Fire Resistance");
+  expect(markup).toContain('aria-label="Prefix tier 3"');
+  expect(markup).toContain(">P3<");
+  expect(markup).toContain('aria-label="Suffix tier 2"');
+  expect(markup).toContain(">S2<");
   expect(detailedSource).toContain("<ItemPriceCheckOptions");
   expect(compactSource).toContain("<ItemPriceCheckOptions");
   expect(mainPageSource).toContain(
     "onModifierSelectionChange={setModifierSelection}",
+  );
+});
+
+test("lets users include or exclude rune and enchant price filters", () => {
+  const item = createItem("enchanted", "Shop", "Rune Hood", 2, "chaos");
+  item.item.enchantMods = [
+    "8% increased Reservation Efficiency of Minion Skills",
+  ];
+
+  const markup = renderToStaticMarkup(
+    createElement(ItemPriceCheckOptions, {
+      item,
+      modifierSelection: {
+        implicit: [],
+        explicit: [],
+        enchant: [false],
+      },
+      onModifierSelectionChange: () => {},
+    }),
+  );
+
+  expect(markup).toContain(
+    'aria-label="Include enchant modifier: 8% increased Reservation Efficiency of Minion Skills"',
   );
 });
 
@@ -289,6 +388,17 @@ test("uses the compact sales workspace as the single main view", async () => {
   expect(workspaceSource).toContain("<CompactItemList");
   expect(mainPageSource).toContain("onPriceCheck={priceCheckItem}");
   expect(mainPageSource).toContain("onStashPriceCheck={priceCheckItems}");
+});
+
+test("reconciles sold listings on refresh and prices the full loaded inventory", async () => {
+  const contextSource = await Bun.file(
+    `${import.meta.dir}/../src/contexts/AppContext.tsx`,
+  ).text();
+
+  expect(contextSource).toContain("await getItems(accountName);");
+  expect(contextSource).toContain('if (sync.status !== "done")');
+  expect(contextSource).toContain("await priceCheckItems(accountItems);");
+  expect(contextSource).not.toContain("await priceCheckItems(filteredItems);");
 });
 
 test("uses the current-price color for a great detailed suggestion", () => {

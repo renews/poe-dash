@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Settings } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAppContext } from "../contexts/AppContext";
@@ -8,6 +8,7 @@ import {
   MAX_MODIFIER_RANGE_PERCENT,
   MIN_MODIFIER_RANGE_PERCENT,
 } from "../services/PriceEstimator";
+import { shortcutFromKeyboardEvent } from "../services/priceCheckShortcut";
 import {
   formFieldClassName,
   formLabelClassName,
@@ -26,10 +27,15 @@ const ConfigurationPage: React.FC = () => {
     setModifierRangePercent,
     openMarketInspectorOnSelect,
     setOpenMarketInspectorOnSelect,
+    priceCheckShortcut,
+    setPriceCheckShortcut,
     isSyncing,
     getItems,
   } = useAppContext();
   const navigate = useNavigate();
+  const [shortcutHelp, setShortcutHelp] = useState(
+    "Focus the field, then press a modifier and a letter, number, or F1 to F12.",
+  );
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -40,6 +46,28 @@ const ConfigurationPage: React.FC = () => {
     localStorage.setItem("accountName", accountName);
     void getItems(accountName);
     navigate("/", { replace: true });
+  };
+
+  const handleShortcutKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (event.key === "Tab" || event.key === "Escape") {
+      return;
+    }
+
+    event.preventDefault();
+    const shortcut = shortcutFromKeyboardEvent(event);
+    if (shortcut) {
+      setPriceCheckShortcut(shortcut);
+      setShortcutHelp(`${shortcut} is now the live price check shortcut.`);
+      return;
+    }
+
+    if (!["Control", "Alt", "Meta", "Shift"].includes(event.key)) {
+      setShortcutHelp(
+        "Use Ctrl, Alt, or Meta with A to Z, 0 to 9, or F1 to F12. Shift is optional.",
+      );
+    }
   };
 
   return (
@@ -118,6 +146,31 @@ const ConfigurationPage: React.FC = () => {
           <span className="flex justify-between text-xs text-gray-400">
             <span>{MIN_MODIFIER_RANGE_PERCENT}%</span>
             <span>{MAX_MODIFIER_RANGE_PERCENT}%</span>
+          </span>
+        </label>
+
+        <label className={`${formLabelClassName} sm:col-span-2`}>
+          Live price check shortcut
+          <input
+            type="text"
+            readOnly
+            value={priceCheckShortcut}
+            onKeyDown={handleShortcutKeyDown}
+            onFocus={() =>
+              setShortcutHelp(
+                "Press a modifier and a letter, number, or F1 to F12.",
+              )
+            }
+            aria-describedby="price-check-shortcut-help"
+            className={`${formFieldClassName} w-full`}
+          />
+          <span
+            id="price-check-shortcut-help"
+            role="status"
+            aria-live="polite"
+            className="text-xs text-gray-400"
+          >
+            {shortcutHelp}
           </span>
         </label>
 

@@ -12,6 +12,11 @@ import {
   getPublicListingStashCounts,
   getPublicListingStashLabel,
 } from "../services/stashScope";
+import {
+  filterSalesItems,
+  type SalesItemFilter,
+} from "../services/salesItemFilter";
+import { SalesItemFilterField } from "./SalesItemFilterField";
 import { TradeWorkspace } from "./TradeWorkspace";
 
 const MainPage: React.FC = () => {
@@ -28,6 +33,7 @@ const MainPage: React.FC = () => {
     toggleLiveMonitoring,
     isPriceChecking,
     priceEstimates,
+    priceCheckErrors,
     modifierSelections,
     setModifierSelection,
     openMarketInspectorOnSelect,
@@ -39,10 +45,16 @@ const MainPage: React.FC = () => {
     priceCheckItem,
     priceCheckItems,
     refreshAllItems,
-    priceCheckAllItems,
     filteredItems,
   } = useAppContext();
+  const [itemFilter, setItemFilter] = React.useState<SalesItemFilter>("all");
   const stashCounts = getPublicListingStashCounts(items);
+  const visibleItems = filterSalesItems(
+    filteredItems,
+    itemFilter,
+    priceEstimates,
+    priceCheckErrors,
+  );
 
   const handleSearch = (event: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(event.target.value);
@@ -83,6 +95,7 @@ const MainPage: React.FC = () => {
               />
             </span>
           </label>
+          <SalesItemFilterField value={itemFilter} onChange={setItemFilter} />
           <button
             type="button"
             onClick={refreshAllItems}
@@ -94,8 +107,8 @@ const MainPage: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={priceCheckAllItems}
-            disabled={isPriceChecking}
+            onClick={() => priceCheckItems(visibleItems)}
+            disabled={isPriceChecking || visibleItems.length === 0}
             className={`${primaryButtonClassName} price-all-button`}
           >
             <Sparkles aria-hidden="true" />
@@ -130,11 +143,12 @@ const MainPage: React.FC = () => {
         </section>
       ) : (
         <TradeWorkspace
-          items={filteredItems}
+          items={visibleItems}
           allItems={items}
           stashTabs={stashTabs}
           selectedStash={selectedStash}
           priceEstimates={priceEstimates}
+          priceCheckErrors={priceCheckErrors}
           modifierSelections={modifierSelections}
           league={selectedLeague}
           openMarketInspectorOnSelect={openMarketInspectorOnSelect}

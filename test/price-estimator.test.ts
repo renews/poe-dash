@@ -29,6 +29,7 @@ import {
 import { AGED_LISTING_PRICE_REDUCTION_FACTOR } from "../src/services/listingPricePolicy";
 import { Poe2Trade } from "../src/services/poe2trade";
 import { Poe2Scout } from "../src/services/Poe2ScoutClient";
+import { Cache } from "../src/services/Cache";
 
 test("reports when no comparable listings are available", () => {
   expect(() => PriceChecker.priceEstimate([])).toThrow(
@@ -50,6 +51,21 @@ test("uses robust comparable analysis for the suggested price", () => {
   expect(estimate.confidence).toBe("medium");
 });
 
+test("honors an explicitly configured seven-seller requirement", () => {
+  const comparables = [10, 11, 12, 13, 14, 15].map((amount, index) => ({
+    amount,
+    currency: "exalted",
+    itemId: `item-${index}`,
+    item: { listing: { account: { name: `seller-${index}` } } },
+  }));
+
+  expect(() =>
+    PriceChecker.priceEstimate(comparables, {
+      minimumIndependentSellers: 7,
+    }),
+  ).toThrow("at least 7 independent sellers");
+});
+
 test("handles items without extended explicit modifier metadata", async () => {
   const item = {
     item: { extended: { mods: {} } },
@@ -58,14 +74,272 @@ test("handles items without extended explicit modifier metadata", async () => {
   await expect(PriceChecker.getHighTierMods(item, 3)).resolves.toEqual([]);
 });
 
-test("skips modifiers that are not in the local stat table", () => {
+test("reports modifiers that are not in the local stat table", () => {
   const item = {
     item: {
       explicitMods: ["82% increased effect of Socketed [Augment] Items"],
     },
   } as Poe2Item;
 
-  expect(PriceChecker.parseItemMods(item).explicits).toEqual([]);
+  expect(PriceChecker.parseItemMods(item)).toMatchObject({
+    explicits: [],
+    unresolved: [
+      {
+        section: "explicit",
+        sourceIndex: 0,
+        text: "82% increased effect of Socketed [Augment] Items",
+      },
+    ],
+  });
+});
+
+test("refuses a category-only estimate when copied rare modifiers are unknown", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  Poe2Trade.getItemByAttributes = async () => ({
+    id: "unsafe-category-query",
+    complexity: 0,
+    result: ["unrelated-rare"],
+    total: 1,
+  });
+
+  try {
+    await expect(
+      PriceChecker.findMatchingItem(
+        {
+          id: "clipboard-rare",
+          origin: "clipboard",
+          item: {
+            frameType: 2,
+            rarity: "Rare",
+            typeLine: "Amethyst Ring",
+            baseType: "Amethyst Ring",
+            properties: [{ name: "Rings", values: [], displayMode: 0 }],
+            explicitMods: [
+              "82% increased effect of Socketed [Augment] Items",
+            ],
+            implicitMods: [],
+          },
+        } as Poe2Item,
+        "Standard",
+      ),
+    ).rejects.toThrow("cannot be matched to current trade data");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("keeps copied rare pricing safe after unsupported modifiers are deselected", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  Poe2Trade.getItemByAttributes = async () => ({
+    id: "unsafe-category-query",
+    complexity: 0,
+    result: ["unrelated-rare"],
+    total: 1,
+  });
+
+  try {
+    await expect(
+      PriceChecker.findMatchingItem(
+        {
+          id: "clipboard-rare",
+          origin: "clipboard",
+          item: {
+            frameType: 2,
+            rarity: "Rare",
+            typeLine: "Amethyst Ring",
+            baseType: "Amethyst Ring",
+            properties: [{ name: "Rings", values: [], displayMode: 0 }],
+            explicitMods: [
+              "82% increased effect of Socketed [Augment] Items",
+            ],
+            implicitMods: [],
+          },
+        } as Poe2Item,
+        "Standard",
+        { explicit: [false], implicit: [] },
+      ),
+    ).rejects.toThrow("cannot be matched to current trade data");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("keeps modifier selections aligned when an earlier copied modifier is unknown", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let capturedSearch: Poe2ItemSearch | undefined;
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    capturedSearch = searchParams;
+    return {
+      id: "aligned-modifier-query",
+      complexity: 0,
+      result: ["matching-rare"],
+      total: 1,
+    };
+  };
+
+  try {
+    await PriceChecker.findMatchingItem(
+      {
+        id: "clipboard-rare",
+        origin: "clipboard",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          typeLine: "Amethyst Ring",
+          baseType: "Amethyst Ring",
+          properties: [{ name: "Rings", values: [], displayMode: 0 }],
+          explicitMods: [
+            "82% increased effect of Socketed [Augment] Items",
+            "50% increased Attack Speed",
+          ],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+      { explicit: [false, true], implicit: [] },
+    );
+
+    expect(capturedSearch?.explicit).toEqual([
+      { id: "explicit.stat_681332047", min: 44 },
+    ]);
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("adds selected rune enchants and exact corruption to copied item searches", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let capturedSearch: Poe2ItemSearch | undefined;
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    capturedSearch = searchParams;
+    return {
+      id: "rune-query",
+      complexity: 0,
+      result: ["matching-helmet"],
+      total: 1,
+    };
+  };
+
+  try {
+    await PriceChecker.findMatchingItem(
+      {
+        id: "clipboard-helmet",
+        origin: "clipboard",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          typeLine: "Trapper Hood",
+          baseType: "Trapper Hood",
+          corrupted: true,
+          properties: [{ name: "Helmets", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+          enchantMods: [
+            "82% increased effect of Socketed [Augment] Items",
+            "8% increased Reservation Efficiency of Minion Skills",
+          ],
+        },
+      } as Poe2Item,
+      "Standard",
+      {
+        explicit: [],
+        implicit: [],
+        enchant: [false, true],
+      } as Parameters<typeof PriceChecker.findMatchingItem>[2] & {
+        enchant: boolean[];
+      },
+    );
+
+    expect(capturedSearch).toMatchObject({
+      corrupted: "true",
+      rarity: "nonunique",
+      category: "armour.helmet",
+      explicit: [
+        { id: "rune.stat_1805633363", min: 7 },
+      ],
+      implicit: [],
+      pseudo: [],
+    });
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("refuses a category-only copied item search when its enchant is unresolved", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let requested = false;
+  Poe2Trade.getItemByAttributes = async () => {
+    requested = true;
+    return {
+      id: "unsafe-enchant-query",
+      complexity: 0,
+      result: ["unrelated-helmet"],
+      total: 1,
+    };
+  };
+
+  try {
+    await expect(
+      PriceChecker.findMatchingItem(
+        {
+          id: "clipboard-helmet",
+          origin: "clipboard",
+          item: {
+            frameType: 2,
+            rarity: "Rare",
+            typeLine: "Trapper Hood",
+            baseType: "Trapper Hood",
+            corrupted: false,
+            properties: [{ name: "Helmets", values: [], displayMode: 0 }],
+            explicitMods: [],
+            implicitMods: [],
+            enchantMods: [
+              "82% increased effect of Socketed [Augment] Items",
+            ],
+          },
+        } as Poe2Item,
+        "Standard",
+      ),
+    ).rejects.toThrow("cannot be matched to current trade data");
+    expect(requested).toBe(false);
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("keeps the exact uncorrupted state in copied item search metadata", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let capturedSearch: Poe2ItemSearch | undefined;
+  const item = {
+    origin: "clipboard",
+    item: {
+      corrupted: false,
+      frameType: 2,
+      rarity: "Rare",
+      typeLine: "Trapper Hood",
+      baseType: "Trapper Hood",
+      properties: [{ name: "Helmets", values: [], displayMode: 0 }],
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    capturedSearch = searchParams;
+    return {
+      id: "uncorrupted-query",
+      complexity: 0,
+      result: ["matching-helmet"],
+      total: 1,
+    };
+  };
+
+  try {
+    expect(getItemSearchMetadata(item)).toMatchObject({ corrupted: "false" });
+    await PriceChecker.findMatchingItem(item, "Standard");
+    expect(capturedSearch).toMatchObject({ corrupted: "false" });
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
 });
 
 test("keeps structured unknown modifiers for trade matching", () => {
@@ -173,6 +447,376 @@ test("includes gem level and quality in gem search metadata", () => {
     gemLevel: 15,
     quality: 20,
   });
+});
+
+test("omits unsupported rarity filters for currency trade searches", () => {
+  expect(
+    getItemSearchMetadata({
+      item: {
+        frameType: 5,
+        rarity: "Currency",
+        typeLine: "Exalted Orb",
+        baseType: "Exalted Orb",
+        properties: [{ name: "Currency", values: [], displayMode: 0 }],
+      },
+    } as Poe2Item),
+  ).toMatchObject({
+    baseType: "Exalted Orb",
+    category: "currency",
+    rarity: undefined,
+  });
+});
+
+test("uses the explicitly configured league over stale item metadata", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  let requestedLeague: string | undefined;
+  Poe2Trade.getItemByAttributes = async (_search, league) => {
+    requestedLeague = league;
+    return {
+      id: "configured-league-query",
+      complexity: 0,
+      result: ["matching-ring"],
+      total: 1,
+    };
+  };
+
+  try {
+    await PriceChecker.findMatchingItem(
+      {
+        id: "clipboard-ring",
+        origin: "clipboard",
+        item: {
+          league: "Standard",
+          frameType: 2,
+          rarity: "Rare",
+          typeLine: "Amethyst Ring",
+          baseType: "Amethyst Ring",
+          properties: [{ name: "Rings", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Runes of Aldur",
+      { explicit: [], implicit: [] },
+    );
+
+    expect(requestedLeague).toBe("Runes of Aldur");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("uses reliable official exchange pricing before lower currency fallbacks", async () => {
+  const originalGetTradeStaticData = Poe2Trade.client.getTradeStaticData;
+  const originalGetExchangeListings = Poe2Trade.client.getExchangeListings;
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  let scoutCalls = 0;
+  let regularTradeCalls = 0;
+
+  Poe2Trade.client.getTradeStaticData = async () => ({
+    result: [
+      {
+        id: "Currency",
+        label: "Currency",
+        entries: [{ id: "divine", text: "Divine Orb" }],
+      },
+    ],
+  });
+  Poe2Trade.client.getExchangeListings = async () => ({
+    id: "exchange-id",
+    result: Object.fromEntries(
+      [100, 110, 120].map((amount, index) => [
+        `listing-${index}`,
+        {
+          id: `listing-${index}`,
+          listing: {
+            account: { name: `seller-${index}` },
+            offers: [
+              {
+                exchange: { currency: "exalted", amount },
+                item: { currency: "divine", amount: 1, stock: 10 },
+              },
+            ],
+          },
+        },
+      ]),
+    ),
+  } as Awaited<ReturnType<typeof Poe2Trade.client.getExchangeListings>>);
+  Poe2Scout.getMarketValuation = async () => {
+    scoutCalls += 1;
+    return undefined;
+  };
+  PriceChecker.findMatchingItem = async () => {
+    regularTradeCalls += 1;
+    throw new Error("Regular trade should not run after reliable exchange data");
+  };
+  PriceChecker.upscalePrice = async (price) => price;
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      {
+        id: "clipboard-divine",
+        origin: "clipboard",
+        item: {
+          id: "clipboard-divine",
+          frameType: 5,
+          rarity: "Currency",
+          typeLine: "Divine Orb",
+          baseType: "Divine Orb",
+          properties: [{ name: "Currency", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+      { explicit: [], implicit: [] },
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      { applyListingContext: false, recordResult: false },
+    );
+
+    expect(estimate).toMatchObject({
+      price: { amount: 110, currency: "exalted" },
+      source: "currency-exchange",
+      method: "exchange-median",
+      sourceComparableCount: 3,
+      search: {
+        strategy: "exchange-exact",
+        searchId: "exchange-id",
+        tradeTag: "divine",
+        paymentCurrency: "exalted",
+      },
+    });
+    expect(scoutCalls).toBe(0);
+    expect(regularTradeCalls).toBe(0);
+  } finally {
+    Poe2Trade.client.getTradeStaticData = originalGetTradeStaticData;
+    Poe2Trade.client.getExchangeListings = originalGetExchangeListings;
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+  }
+});
+
+test("uses Scout only after official exchange and regular trade are unavailable", async () => {
+  const originalGetTradeStaticData = Poe2Trade.client.getTradeStaticData;
+  const originalGetExchangeListings = Poe2Trade.client.getExchangeListings;
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  let regularTradeCalls = 0;
+
+  Poe2Trade.client.getTradeStaticData = async () => ({
+    result: [
+      {
+        id: "Currency",
+        label: "Currency",
+        entries: [{ id: "divine", text: "Divine Orb" }],
+      },
+    ],
+  });
+  Poe2Trade.client.getExchangeListings = async () => ({
+    id: "exchange-id",
+    result: {},
+  } as Awaited<ReturnType<typeof Poe2Trade.client.getExchangeListings>>);
+  Poe2Scout.getMarketValuation = async () => ({
+    itemId: 1,
+    itemName: "Divine Orb",
+    price: { amount: 105, currency: "exalted" },
+    quantity: 20,
+    updatedAt: Date.now(),
+    history: [{ amount: 105, quantity: 20, updatedAt: Date.now() }],
+    method: "history",
+  });
+  PriceChecker.findMatchingItem = async () => {
+    regularTradeCalls += 1;
+    throw new Error("Regular trade should wait for the Scout fallback");
+  };
+  PriceChecker.upscalePrice = async (price) => price;
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      {
+        id: "clipboard-divine",
+        origin: "clipboard",
+        item: {
+          id: "clipboard-divine",
+          frameType: 5,
+          rarity: "Currency",
+          typeLine: "Divine Orb",
+          baseType: "Divine Orb",
+          properties: [{ name: "Currency", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+      { explicit: [], implicit: [] },
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      { applyListingContext: false, recordResult: false },
+    );
+
+    expect(estimate).toMatchObject({
+      source: "poe2scout",
+      method: "market-history",
+      price: { amount: 105, currency: "exalted" },
+    });
+    expect(regularTradeCalls).toBe(1);
+  } finally {
+    Poe2Trade.client.getTradeStaticData = originalGetTradeStaticData;
+    Poe2Trade.client.getExchangeListings = originalGetExchangeListings;
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+  }
+});
+
+test("uses regular trade before the Scout currency fallback", async () => {
+  const originalGetTradeStaticData = Poe2Trade.client.getTradeStaticData;
+  const originalGetExchangeListings = Poe2Trade.client.getExchangeListings;
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  let scoutCalls = 0;
+  let regularTradeCalls = 0;
+
+  Poe2Trade.client.getTradeStaticData = async () => ({
+    result: [
+      {
+        id: "Currency",
+        label: "Currency",
+        entries: [{ id: "divine", text: "Divine Orb" }],
+      },
+    ],
+  });
+  Poe2Trade.client.getExchangeListings = async () => ({
+    id: "exchange-id",
+    result: {},
+  });
+  Poe2Scout.getMarketValuation = async () => {
+    scoutCalls += 1;
+    return undefined;
+  };
+  PriceChecker.findMatchingItem = async () => {
+    regularTradeCalls += 1;
+    return {
+      id: "regular-trade-id",
+      complexity: 0,
+      result: Array.from({ length: 7 }, (_value, index) => `item-${index}`),
+      total: 7,
+      strategy: "strict",
+      selectedModifierCount: 0,
+      minimumModifierCount: 0,
+    };
+  };
+  PriceChecker.getPricesForItemIds = async () =>
+    Array.from({ length: 7 }, (_value, index) => ({
+      amount: 100 + index,
+      currency: "exalted",
+      itemId: `item-${index}`,
+      listedAmount: 100 + index,
+      listedCurrency: "exalted",
+      item: {
+        listing: { account: { name: `seller-${index}` } },
+      } as Poe2Item,
+    }));
+  PriceChecker.fetchManyExchangeRates = async () => {};
+  PriceChecker.upscalePrice = async (price) => price;
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      {
+        id: "clipboard-divine",
+        origin: "clipboard",
+        item: {
+          id: "clipboard-divine",
+          frameType: 5,
+          rarity: "Currency",
+          typeLine: "Divine Orb",
+          baseType: "Divine Orb",
+          properties: [{ name: "Currency", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+      { explicit: [], implicit: [] },
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      {
+        applyListingContext: false,
+        recordResult: false,
+        minimumIndependentSellers: 7,
+      },
+    );
+
+    expect(estimate.source).toBe("official-trade");
+    expect(estimate.comparables).toHaveLength(7);
+    expect(scoutCalls).toBe(0);
+    expect(regularTradeCalls).toBe(1);
+  } finally {
+    Poe2Trade.client.getTradeStaticData = originalGetTradeStaticData;
+    Poe2Trade.client.getExchangeListings = originalGetExchangeListings;
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+  }
+});
+
+test("does not continue currency fallbacks after cancellation", async () => {
+  const originalGetTradeStaticData = Poe2Trade.client.getTradeStaticData;
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const controller = new AbortController();
+  let scoutCalls = 0;
+  let regularTradeCalls = 0;
+
+  Poe2Trade.client.getTradeStaticData = async () => {
+    throw new Error("Request cancelled");
+  };
+  Poe2Scout.getMarketValuation = async () => {
+    scoutCalls += 1;
+    return undefined;
+  };
+  PriceChecker.findMatchingItem = async () => {
+    regularTradeCalls += 1;
+    throw new Error("Regular trade should not run after cancellation");
+  };
+  controller.abort();
+
+  try {
+    await expect(
+      PriceChecker.estimateItemPrice(
+        {
+          id: "clipboard-divine",
+          origin: "clipboard",
+          item: {
+            frameType: 5,
+            rarity: "Currency",
+            typeLine: "Divine Orb",
+            baseType: "Divine Orb",
+            properties: [{ name: "Currency", values: [], displayMode: 0 }],
+            explicitMods: [],
+            implicitMods: [],
+          },
+        } as Poe2Item,
+        "Standard",
+        { explicit: [], implicit: [] },
+        DEFAULT_MODIFIER_RANGE_PERCENT,
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow("Request cancelled");
+    expect(scoutCalls).toBe(0);
+    expect(regularTradeCalls).toBe(0);
+  } finally {
+    Poe2Trade.client.getTradeStaticData = originalGetTradeStaticData;
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+  }
 });
 
 test("does not send a gem name in trade searches", async () => {
@@ -458,6 +1102,22 @@ test("uses a configured comparison range for comparable modifiers", () => {
   expect(DEFAULT_MODIFIER_RANGE_PERCENT).toBe(12);
 });
 
+test("compares a two-value damage modifier by its average roll", () => {
+  const modifier = PriceChecker.extractMod(
+    "Adds 3 to 106 Lightning Damage",
+    "explicit",
+  );
+
+  expect(modifier).toMatchObject({ value1: 3, value2: 106 });
+  expect(buildModifierSearchFilters([modifier]).explicit).toEqual([
+    {
+      id: "explicit.stat_3336890334",
+      min: 47,
+      max: 62,
+    },
+  ]);
+});
+
 test("serializes pseudo filters into the trade stat group", () => {
   expect(
     buildTradeStatFilters({
@@ -588,6 +1248,167 @@ test("retries an empty strict search by allowing one selected modifier to miss",
   }
 });
 
+test("relaxes the Awakened-style rare search until it has enough peers", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const searches: Poe2ItemSearch[] = [];
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    if (searches.length < 3) {
+      return {
+        id: `query-${searches.length}`,
+        complexity: 0,
+        result: ["priced-item"],
+        total: 1,
+      };
+    }
+
+    return {
+      id: "query-3",
+      complexity: 0,
+      result: [
+        "priced-item",
+        ...Array.from(
+          { length: 7 },
+          (_value, index) => `comparable-${index}`,
+        ),
+      ],
+      total: 8,
+    };
+  };
+
+  try {
+    const result = await PriceChecker.findMatchingItem(
+      {
+        id: "priced-item",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          baseType: "Adherent Bow",
+          properties: [{ name: "Bows", values: [], displayMode: 0 }],
+          explicitMods: Array.from({ length: 4 }, (_value, index) => ({
+            description: `${index + 10}% increased Attack Speed`,
+            hash: `explicit.stat_${index}`,
+            mods: [],
+          })),
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "HC Runes of Aldur",
+    );
+
+    expect(searches).toHaveLength(3);
+    expect(searches.map((search) => search.statGroupMin)).toEqual([
+      undefined,
+      3,
+      2,
+    ]);
+    expect(result).toMatchObject({
+      id: "query-3",
+      strategy: "market-pseudos",
+      selectedModifierCount: 4,
+      minimumModifierCount: 2,
+    });
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("continues Awakened-style relaxation when listings come from too few sellers", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  const originalMatchesCurrentPrice = PriceChecker.matchesCurrentPrice;
+  const originalCachePriceEstimate = PriceChecker.cachePriceEstimate;
+  const searches: Poe2ItemSearch[] = [];
+  let scoutCalls = 0;
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    return {
+      id: `query-${searches.length}`,
+      complexity: 0,
+      result: Array.from(
+        { length: 7 },
+        (_value, index) => `query-${searches.length}-item-${index}`,
+      ),
+      total: 7,
+    };
+  };
+  PriceChecker.getPricesForItemIds = async (ids) =>
+    ids.map((id, index) => ({
+      amount: 10 + index,
+      currency: "exalted",
+      itemId: id,
+      listedAmount: 10 + index,
+      listedCurrency: "exalted",
+      item: {
+        listing: {
+          account: {
+            name: searches.length < 3 ? "shared-seller" : `seller-${index}`,
+          },
+        },
+      } as Poe2Item,
+    }));
+  PriceChecker.fetchManyExchangeRates = async () => {};
+  Poe2Scout.getMarketValuation = async () => {
+    scoutCalls += 1;
+    return undefined;
+  };
+  PriceChecker.upscalePrice = async (price) => price;
+  PriceChecker.matchesCurrentPrice = async () => false;
+  PriceChecker.cachePriceEstimate = () => {};
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      {
+        id: "priced-item",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          baseType: "Fine Ring",
+          properties: [{ name: "Rings", values: [], displayMode: 0 }],
+          explicitMods: Array.from({ length: 4 }, (_value, index) => ({
+            description: `${index + 10}% increased Attack Speed`,
+            hash: `explicit.stat_${index}`,
+            mods: [],
+          })),
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "HC Runes of Aldur",
+      undefined,
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      { minimumIndependentSellers: 7 },
+    );
+
+    expect(searches.map((search) => search.statGroupMin)).toEqual([
+      undefined,
+      3,
+      2,
+    ]);
+    expect(estimate).toMatchObject({
+      source: "official-trade",
+      search: {
+        strategy: "market-pseudos",
+        selectedModifierCount: 4,
+        minimumModifierCount: 2,
+      },
+    });
+    expect(scoutCalls).toBe(0);
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+    PriceChecker.matchesCurrentPrice = originalMatchesCurrentPrice;
+    PriceChecker.cachePriceEstimate = originalCachePriceEstimate;
+  }
+});
+
 test("keeps fractional prices visible", () => {
   expect(formatPriceAmount(0.109)).toBe("0.109");
 });
@@ -688,28 +1509,38 @@ test("uses the Search result set for price estimates", async () => {
   const originalCachePriceEstimate = PriceChecker.cachePriceEstimate;
   const item = {
     id: "item-id",
+    origin: "clipboard",
     item: {
       id: "item-id",
       baseType: "Fine Ring",
+      corrupted: false,
       explicitMods: ["100 to maximum Life", "50% increased Attack Speed"],
       implicitMods: [],
+      enchantMods: [
+        "8% increased Reservation Efficiency of Minion Skills",
+      ],
     },
   } as Poe2Item;
   const modifierSelection = {
     explicit: [true, true],
     implicit: [],
+    enchant: [true],
     itemLevel: false,
   };
   const searchArguments: unknown[][] = [];
   const pricedIds: string[][] = [];
+  const matchingIds = Array.from(
+    { length: 7 },
+    (_value, index) => `matching-${index}`,
+  );
 
   PriceChecker.findMatchingItem = (async (...args) => {
     searchArguments.push(args);
     return {
       id: "search-id",
       complexity: 0,
-      result: ["matching-id"],
-      total: 1,
+      result: matchingIds,
+      total: matchingIds.length,
       strategy: "one-mod-relaxed",
       selectedModifierCount: 2,
       minimumModifierCount: 1,
@@ -717,15 +1548,13 @@ test("uses the Search result set for price estimates", async () => {
   }) as typeof PriceChecker.findMatchingItem;
   PriceChecker.getPricesForItemIds = (async (ids) => {
     pricedIds.push(ids);
-    return [
-      {
-        amount: 10,
+    return ids.map((id, index) => ({
+        amount: 10 + index,
         currency: "exalted",
-        itemId: "matching-id",
-        listedAmount: 10,
+        itemId: id,
+        listedAmount: 10 + index,
         listedCurrency: "exalted",
-      },
-    ];
+      }));
   }) as typeof PriceChecker.getPricesForItemIds;
   PriceChecker.fetchManyExchangeRates = async () => {};
   PriceChecker.upscalePrice = async (price) => price;
@@ -740,19 +1569,23 @@ test("uses the Search result set for price estimates", async () => {
     );
 
     expect(searchArguments).toHaveLength(1);
-    expect(searchArguments[0]).toEqual([
+    expect(searchArguments[0].slice(0, 5)).toEqual([
       item,
       "Standard",
       modifierSelection,
       DEFAULT_MODIFIER_RANGE_PERCENT,
       {},
     ]);
-    expect(pricedIds).toEqual([["matching-id"]]);
+    expect(typeof searchArguments[0][5]).toBe("function");
+    expect(pricedIds).toEqual([matchingIds]);
     expect(estimate.confidence).toBe("low");
     expect(estimate.search).toMatchObject({
       strategy: "one-mod-relaxed",
       selectedModifierCount: 2,
       minimumModifierCount: 1,
+      enchantCount: 1,
+      enchantHashes: ["rune.stat_1805633363"],
+      corrupted: "false",
     });
   } finally {
     PriceChecker.findMatchingItem = originalFindMatchingItem;
@@ -761,6 +1594,314 @@ test("uses the Search result set for price estimates", async () => {
     PriceChecker.upscalePrice = originalUpscalePrice;
     PriceChecker.matchesCurrentPrice = originalMatchesCurrentPrice;
     PriceChecker.cachePriceEstimate = originalCachePriceEstimate;
+  }
+});
+
+test("uses one official seller before requesting a Poe2Scout fallback", async () => {
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  let scoutCalls = 0;
+
+  Poe2Scout.getMarketValuation = async () => {
+    scoutCalls += 1;
+    return {
+      itemId: 4993,
+      itemName: "Darkness Enthroned",
+      price: { amount: 42, currency: "exalted" },
+      quantity: 17,
+      updatedAt: Date.now(),
+      history: [],
+    };
+  };
+  PriceChecker.findMatchingItem = async () => ({
+    id: "official-search",
+    complexity: 0,
+    result: ["item-0"],
+    total: 1,
+    strategy: "strict",
+    selectedModifierCount: 0,
+    minimumModifierCount: 0,
+  });
+  PriceChecker.getPricesForItemIds = async () => [
+    {
+      amount: 100,
+      currency: "exalted",
+      itemId: "item-0",
+      listedAmount: 100,
+      listedCurrency: "exalted",
+      item: {
+        listing: { account: { name: "seller-0" } },
+      } as Poe2Item,
+    },
+  ];
+  PriceChecker.fetchManyExchangeRates = async () => {};
+  PriceChecker.upscalePrice = async (price) => price;
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      {
+        id: "clipboard-unique",
+        origin: "clipboard",
+        item: {
+          frameType: 3,
+          rarity: "Unique",
+          name: "Darkness Enthroned",
+          typeLine: "Darkness Enthroned",
+          baseType: "Fine Belt",
+          properties: [{ name: "Belts", values: [], displayMode: 0 }],
+          explicitMods: [],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "Standard",
+      undefined,
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      {
+        applyListingContext: false,
+        recordResult: false,
+      },
+    );
+
+    expect(estimate.source).toBe("official-trade");
+    expect(estimate.comparables).toHaveLength(1);
+    expect(estimate.confidence).toBe("low");
+    expect(scoutCalls).toBe(0);
+  } finally {
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+  }
+});
+
+test("does not apply listing context or record clipboard-only estimates", async () => {
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const originalPriceEstimate = PriceChecker.priceEstimate;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  const originalMatchesCurrentPrice = PriceChecker.matchesCurrentPrice;
+  const originalCachePriceEstimate = PriceChecker.cachePriceEstimate;
+  let matchCalls = 0;
+  let cacheCalls = 0;
+  const item = {
+    id: "clipboard-item",
+    origin: "clipboard",
+    listing: {
+      indexed: new Date(Date.now() - 13 * 24 * 60 * 60 * 1000).toISOString(),
+      price: { amount: 1, currency: "exalted" },
+      stash: { name: "Clipboard", x: 0, y: 0 },
+    },
+    item: {
+      id: "clipboard-item",
+      baseType: "Fine Ring",
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+
+  Poe2Scout.getMarketValuation = async () => undefined;
+  PriceChecker.findMatchingItem = async () => ({
+    id: "search-id",
+    complexity: 0,
+    result: ["matching-id"],
+    total: 1,
+  });
+  PriceChecker.getPricesForItemIds = async () => [
+    {
+      amount: 100,
+      currency: "exalted",
+      itemId: "matching-id",
+      listedAmount: 100,
+      listedCurrency: "exalted",
+    },
+  ];
+  PriceChecker.fetchManyExchangeRates = async () => {};
+  PriceChecker.priceEstimate = () => ({
+    price: { amount: 100, currency: "exalted" },
+    stdDev: { amount: 20, currency: "exalted" },
+    comparables: [],
+  });
+  PriceChecker.upscalePrice = async (price) => price;
+  PriceChecker.matchesCurrentPrice = async () => {
+    matchCalls += 1;
+    return false;
+  };
+  PriceChecker.cachePriceEstimate = () => {
+    cacheCalls += 1;
+  };
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      item,
+      "Standard",
+      undefined,
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      { applyListingContext: false, recordResult: false },
+    );
+
+    expect(estimate.price).toEqual({ amount: 100, currency: "exalted" });
+    expect(estimate.stdDev).toEqual({ amount: 20, currency: "exalted" });
+    expect(estimate.listingAgeAdjustmentFactor).toBeUndefined();
+    expect(estimate.matchesCurrentPrice).toBeUndefined();
+    expect(matchCalls).toBe(0);
+    expect(cacheCalls).toBe(0);
+  } finally {
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    PriceChecker.priceEstimate = originalPriceEstimate;
+    PriceChecker.upscalePrice = originalUpscalePrice;
+    PriceChecker.matchesCurrentPrice = originalMatchesCurrentPrice;
+    PriceChecker.cachePriceEstimate = originalCachePriceEstimate;
+  }
+});
+
+test("rejects clipboard trade pricing below the independent seller threshold", async () => {
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const item = {
+    id: "clipboard-unique",
+    origin: "clipboard",
+    item: {
+      id: "clipboard-unique",
+      frameType: 3,
+      rarity: "Unique",
+      name: "Darkness Enthroned",
+      typeLine: "Darkness Enthroned",
+      baseType: "Fine Belt",
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+
+  Poe2Scout.getMarketValuation = async () => undefined;
+  PriceChecker.findMatchingItem = async () => ({
+    id: "search-id",
+    complexity: 0,
+    result: Array.from({ length: 6 }, (_value, index) => `item-${index}`),
+    total: 6,
+  });
+  PriceChecker.getPricesForItemIds = async () =>
+    Array.from({ length: 6 }, (_value, index) => ({
+      amount: 10 + index,
+      currency: "exalted",
+      itemId: `item-${index}`,
+      listedAmount: 10 + index,
+      listedCurrency: "exalted",
+      item: {
+        listing: { account: { name: `seller-${index}` } },
+      } as Poe2Item,
+    }));
+  PriceChecker.fetchManyExchangeRates = async () => {};
+
+  try {
+    await expect(
+      PriceChecker.estimateItemPrice(
+        item,
+        "Standard",
+        undefined,
+        DEFAULT_MODIFIER_RANGE_PERCENT,
+        {
+          applyListingContext: false,
+          recordResult: false,
+          minimumIndependentSellers: 7,
+          maxTradeListings: 100,
+        },
+      ),
+    ).rejects.toThrow("at least 7 independent sellers");
+  } finally {
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+  }
+});
+
+test("falls back to Scout when clipboard trade pricing is under-sampled", async () => {
+  const originalGetMarketValuation = Poe2Scout.getMarketValuation;
+  const originalFindMatchingItem = PriceChecker.findMatchingItem;
+  const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
+  const originalFetchManyExchangeRates = PriceChecker.fetchManyExchangeRates;
+  const originalUpscalePrice = PriceChecker.upscalePrice;
+  const item = {
+    id: "clipboard-unique",
+    origin: "clipboard",
+    item: {
+      id: "clipboard-unique",
+      frameType: 3,
+      rarity: "Unique",
+      name: "Darkness Enthroned",
+      typeLine: "Darkness Enthroned",
+      baseType: "Fine Belt",
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+
+  Poe2Scout.getMarketValuation = async () => ({
+    itemId: 4993,
+    itemName: "Darkness Enthroned",
+    price: { amount: 42, currency: "exalted" },
+    quantity: 17,
+    updatedAt: Date.now(),
+    history: [],
+  });
+  PriceChecker.findMatchingItem = async () => ({
+    id: "search-id",
+    complexity: 0,
+    result: Array.from({ length: 6 }, (_value, index) => `item-${index}`),
+    total: 6,
+    strategy: "strict",
+    selectedModifierCount: 1,
+    minimumModifierCount: 1,
+  });
+  PriceChecker.getPricesForItemIds = async () =>
+    Array.from({ length: 6 }, (_value, index) => ({
+      amount: 100 + index,
+      currency: "exalted",
+      itemId: `item-${index}`,
+      listedAmount: 100 + index,
+      listedCurrency: "exalted",
+      item: {
+        listing: { account: { name: `seller-${index}` } },
+      } as Poe2Item,
+    }));
+  PriceChecker.fetchManyExchangeRates = async () => {};
+  PriceChecker.upscalePrice = async (price) => price;
+
+  try {
+    const estimate = await PriceChecker.estimateItemPrice(
+      item,
+      "Standard",
+      undefined,
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      {
+        applyListingContext: false,
+        recordResult: false,
+        minimumIndependentSellers: 7,
+        maxTradeListings: 100,
+      },
+    );
+
+    expect(estimate.source).toBe("poe2scout");
+    expect(estimate.price).toEqual({ amount: 42, currency: "exalted" });
+    expect(estimate.comparables).toHaveLength(0);
+    expect(estimate.sourceComparableCount).toBe(6);
+  } finally {
+    Poe2Scout.getMarketValuation = originalGetMarketValuation;
+    PriceChecker.findMatchingItem = originalFindMatchingItem;
+    PriceChecker.getPricesForItemIds = originalGetPricesForItemIds;
+    PriceChecker.fetchManyExchangeRates = originalFetchManyExchangeRates;
+    PriceChecker.upscalePrice = originalUpscalePrice;
   }
 });
 
@@ -782,9 +1923,7 @@ test("halves an old listing suggestion and spread before currency promotion", as
   const item = {
     id: "old-item",
     listing: {
-      indexed: new Date(
-        Date.now() - 13 * 24 * 60 * 60 * 1000,
-      ).toISOString(),
+      indexed: new Date(Date.now() - 13 * 24 * 60 * 60 * 1000).toISOString(),
       price: { amount: 80, currency: "exalted" },
       stash: { name: "Shop", x: 0, y: 0 },
     },
@@ -870,7 +2009,7 @@ test("halves an old listing suggestion and spread before currency promotion", as
   }
 });
 
-test("uses modifier-aware trade comparables as the suggestion and retains market value as a baseline", async () => {
+test("uses exact-corruption trade comparables over a generic Scout baseline", async () => {
   const originalGetMarketValuation = Poe2Scout.getMarketValuation;
   const originalFindMatchingItem = PriceChecker.findMatchingItem;
   const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
@@ -879,8 +2018,10 @@ test("uses modifier-aware trade comparables as the suggestion and retains market
   const originalMatchesCurrentPrice = PriceChecker.matchesCurrentPrice;
   const originalCachePriceEstimate = PriceChecker.cachePriceEstimate;
   const updatedAt = Date.parse("2026-07-18T10:25:16Z");
+  let scoutCalls = 0;
   const item = {
     id: "rolled-unique-item",
+    origin: "clipboard",
     item: {
       id: "rolled-unique-item",
       frameType: 3,
@@ -888,43 +2029,40 @@ test("uses modifier-aware trade comparables as the suggestion and retains market
       name: "Darkness Enthroned",
       typeLine: "Darkness Enthroned",
       baseType: "Fine Belt",
-      explicitMods: [
-        {
-          description: "100 to maximum Life",
-          hash: "explicit.stat_1",
-          mods: [],
-        },
-      ],
+      corrupted: true,
+      explicitMods: [],
       implicitMods: [],
     },
   } as Poe2Item;
 
-  Poe2Scout.getMarketValuation = async () => ({
-    itemId: 4993,
-    itemName: "Darkness Enthroned",
-    price: { amount: 42, currency: "exalted" },
-    quantity: 17,
-    updatedAt,
-    history: [{ amount: 42, quantity: 17, updatedAt }],
-  });
+  Poe2Scout.getMarketValuation = async () => {
+    scoutCalls += 1;
+    return {
+      itemId: 4993,
+      itemName: "Darkness Enthroned",
+      price: { amount: 42, currency: "exalted" },
+      quantity: 17,
+      updatedAt,
+      history: [{ amount: 42, quantity: 17, updatedAt }],
+    };
+  };
   PriceChecker.findMatchingItem = async () => ({
     id: "search-id",
     complexity: 0,
-    result: ["matching-id"],
-    total: 1,
+    result: Array.from({ length: 7 }, (_value, index) => `matching-${index}`),
+    total: 7,
     strategy: "strict",
-    selectedModifierCount: 1,
-    minimumModifierCount: 1,
+    selectedModifierCount: 0,
+    minimumModifierCount: 0,
   });
-  PriceChecker.getPricesForItemIds = async () => [
-    {
-      amount: 100,
+  PriceChecker.getPricesForItemIds = async (ids) =>
+    ids.map((id, index) => ({
+      amount: 100 + index,
       currency: "exalted",
-      itemId: "matching-id",
-      listedAmount: 100,
+      itemId: id,
+      listedAmount: 100 + index,
       listedCurrency: "exalted",
-    },
-  ];
+    }));
   PriceChecker.fetchManyExchangeRates = async () => {};
   PriceChecker.upscalePrice = async (price) => price;
   PriceChecker.matchesCurrentPrice = async () => false;
@@ -935,11 +2073,10 @@ test("uses modifier-aware trade comparables as the suggestion and retains market
 
     expect(estimate.source).toBe("official-trade");
     expect(estimate.method).toBe("median");
-    expect(estimate.price).toEqual({ amount: 100, currency: "exalted" });
-    expect(estimate.market?.price).toEqual({
-      amount: 42,
-      currency: "exalted",
-    });
+    expect(estimate.price).toEqual({ amount: 103, currency: "exalted" });
+    expect(estimate.market).toBeUndefined();
+    expect(scoutCalls).toBe(0);
+    expect(estimate.search?.corrupted).toBe("true");
   } finally {
     Poe2Scout.getMarketValuation = originalGetMarketValuation;
     PriceChecker.findMatchingItem = originalFindMatchingItem;
@@ -951,7 +2088,7 @@ test("uses modifier-aware trade comparables as the suggestion and retains market
   }
 });
 
-test("uses Poe2Scout market history for recognized items while retaining trade comparables", async () => {
+test("uses Scout when an explicit seller threshold is under-sampled", async () => {
   const originalGetMarketValuation = Poe2Scout.getMarketValuation;
   const originalFindMatchingItem = PriceChecker.findMatchingItem;
   const originalGetPricesForItemIds = PriceChecker.getPricesForItemIds;
@@ -980,9 +2117,7 @@ test("uses Poe2Scout market history for recognized items while retaining trade c
     price: { amount: 42, currency: "exalted" },
     quantity: 17,
     updatedAt,
-    history: [
-      { amount: 42, quantity: 17, updatedAt },
-    ],
+    history: [{ amount: 42, quantity: 17, updatedAt }],
   });
   PriceChecker.findMatchingItem = async () => ({
     id: "search-id",
@@ -1005,7 +2140,13 @@ test("uses Poe2Scout market history for recognized items while retaining trade c
   PriceChecker.cachePriceEstimate = () => {};
 
   try {
-    const estimate = await PriceChecker.estimateItemPrice(item, "Standard");
+    const estimate = await PriceChecker.estimateItemPrice(
+      item,
+      "Standard",
+      undefined,
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      { minimumIndependentSellers: 2 },
+    );
 
     expect(estimate.source).toBe("poe2scout");
     expect(estimate.method).toBe("market-history");
@@ -1015,7 +2156,8 @@ test("uses Poe2Scout market history for recognized items while retaining trade c
       quantity: 17,
       updatedAt,
     });
-    expect(estimate.comparables).toHaveLength(1);
+    expect(estimate.comparables).toHaveLength(0);
+    expect(estimate.sourceComparableCount).toBe(1);
   } finally {
     Poe2Scout.getMarketValuation = originalGetMarketValuation;
     PriceChecker.findMatchingItem = originalFindMatchingItem;
@@ -1053,6 +2195,323 @@ test("does not use a base type for rare item searches", async () => {
     expect(capturedSearch.rarity).toBe("rare");
     expect(capturedSearch.category).toBe("accessory.amulet");
     expect(capturedSearch).not.toHaveProperty("baseType");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("uses an Awakened-style DPS query for an unconfigured rare weapon", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const searches: Poe2ItemSearch[] = [];
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    return {
+      id: "weapon-dps-search",
+      complexity: 0,
+      result: Array.from(
+        { length: 7 },
+        (_value, index) => `comparable-${index}`,
+      ),
+      total: 7,
+    };
+  };
+
+  try {
+    const result = await PriceChecker.findMatchingItem(
+      {
+        id: "rare-bow",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          baseType: "Adherent Bow",
+          properties: [
+            { name: "Bows", values: [], displayMode: 0 },
+            {
+              name: "Physical Damage",
+              values: [["35-72", 0]],
+              displayMode: 0,
+            },
+            {
+              name: "Lightning Damage",
+              values: [["1-50", 0]],
+              displayMode: 0,
+            },
+            {
+              name: "Attacks per Second",
+              values: [["1.20", 0]],
+              displayMode: 0,
+            },
+          ],
+          explicitMods: [
+            {
+              description: "Adds 1 to 50 Lightning Damage",
+              hash: "explicit.stat_3336890334",
+              mods: [],
+            },
+          ],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "HC Runes of Aldur",
+    );
+
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toMatchObject({
+      status: "securable",
+      rarity: "nonunique",
+      category: "weapon.bow",
+      dps: 83,
+      explicit: [],
+      implicit: [],
+      pseudo: [],
+    });
+    expect(searches[0]).not.toHaveProperty("baseType");
+    expect(result).toMatchObject({
+      strategy: "market-properties",
+      selectedModifierCount: 1,
+      minimumModifierCount: 1,
+    });
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("uses weapon properties when copied modifiers are unresolved", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const searches: Poe2ItemSearch[] = [];
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    return {
+      id: "weapon-property-search",
+      complexity: 0,
+      result: Array.from({ length: 7 }, (_value, index) => `item-${index}`),
+      total: 7,
+    };
+  };
+
+  try {
+    const result = await PriceChecker.findMatchingItem(
+      {
+        id: "copied-bow",
+        origin: "clipboard",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          baseType: "Adherent Bow",
+          properties: [
+            { name: "Bows", values: [], displayMode: 0 },
+            {
+              name: "Lightning Damage",
+              values: [["3-106", 0]],
+              displayMode: 0,
+            },
+            {
+              name: "Attacks per Second",
+              values: [["1.20", 0]],
+              displayMode: 0,
+            },
+          ],
+          explicitMods: ["82% increased effect of Socketed [Augment] Items"],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "HC Runes of Aldur",
+      { explicit: [false], implicit: [] },
+    );
+
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toMatchObject({
+      rarity: "nonunique",
+      category: "weapon.bow",
+      edps: 57,
+    });
+    expect(result.strategy).toBe("market-properties");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("applies selected non-DPS modifiers to the weapon market query", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const searches: Poe2ItemSearch[] = [];
+  const item = {
+    id: "rare-bow",
+    item: {
+      frameType: 2,
+      rarity: "Rare",
+      baseType: "Adherent Bow",
+      properties: [
+        { name: "Bows", values: [], displayMode: 0 },
+        {
+          name: "Lightning Damage",
+          values: [["3-106", 0]],
+          displayMode: 0,
+        },
+        {
+          name: "Attacks per Second",
+          values: [["1.20", 0]],
+          displayMode: 0,
+        },
+      ],
+      explicitMods: [
+        {
+          description: "100 to maximum Life",
+          hash: "explicit.stat_3299347043",
+          mods: [],
+        },
+      ],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    return {
+      id: `weapon-query-${searches.length}`,
+      complexity: 0,
+      result: Array.from({ length: 7 }, (_value, index) => `item-${index}`),
+      total: 7,
+    };
+  };
+
+  try {
+    await PriceChecker.findMatchingItem(item, "HC Runes of Aldur", {
+      explicit: [true],
+      implicit: [],
+    });
+    await PriceChecker.findMatchingItem(item, "HC Runes of Aldur", {
+      explicit: [false],
+      implicit: [],
+    });
+
+    expect(searches).toHaveLength(2);
+    expect(searches[0].pseudo).toEqual([
+      { id: "pseudo.pseudo_total_life", min: 88 },
+    ]);
+    expect(searches[1].pseudo).toEqual([]);
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("uses Awakened-style pseudo totals before exact rare accessory mods", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const searches: Poe2ItemSearch[] = [];
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    return {
+      id: "rare-pseudo-search",
+      complexity: 0,
+      result: Array.from({ length: 7 }, (_value, index) => `item-${index}`),
+      total: 7,
+    };
+  };
+
+  try {
+    const result = await PriceChecker.findMatchingItem(
+      {
+        id: "rare-amulet",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          baseType: "Lapis Amulet",
+          properties: [{ name: "Amulets", values: [], displayMode: 0 }],
+          explicitMods: [
+            {
+              description: "100 to maximum Life",
+              hash: "explicit.stat_3299347043",
+              mods: [],
+            },
+            {
+              description: "25% to Fire Resistance",
+              hash: "explicit.stat_3372524247",
+              mods: [],
+            },
+          ],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "HC Runes of Aldur",
+      { explicit: [true, true], implicit: [] },
+    );
+
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toMatchObject({
+      status: "securable",
+      rarity: "nonunique",
+      category: "accessory.amulet",
+      pseudo: [
+        { id: "pseudo.pseudo_total_life", min: 88 },
+        { id: "pseudo.pseudo_total_elemental_resistance", min: 22 },
+      ],
+    });
+    expect(result.strategy).toBe("market-pseudos");
+  } finally {
+    Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
+  }
+});
+
+test("uses an Awakened-style defence property for single-defence rare armour", async () => {
+  const originalGetItemByAttributes = Poe2Trade.getItemByAttributes;
+  const searches: Poe2ItemSearch[] = [];
+
+  Poe2Trade.getItemByAttributes = async (searchParams) => {
+    searches.push(searchParams);
+    return {
+      id: "armour-market-query",
+      complexity: 0,
+      result: Array.from({ length: 7 }, (_value, index) => `item-${index}`),
+      total: 7,
+    };
+  };
+
+  try {
+    const result = await PriceChecker.findMatchingItem(
+      {
+        id: "rare-armour",
+        item: {
+          frameType: 2,
+          rarity: "Rare",
+          baseType: "Expert Oiled Coat",
+          properties: [
+            { name: "Body Armours", values: [], displayMode: 0 },
+            { name: "Armour", values: [["500", 0]], displayMode: 0 },
+          ],
+          explicitMods: [
+            {
+              description: "90% increased Armour",
+              hash: "explicit.stat_1062208444",
+              mods: [],
+            },
+            {
+              description: "100 to maximum Life",
+              hash: "explicit.stat_3299347043",
+              mods: [],
+            },
+          ],
+          implicitMods: [],
+        },
+      } as Poe2Item,
+      "HC Runes of Aldur",
+    );
+
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toMatchObject({
+      rarity: "nonunique",
+      category: "armour.chest",
+      ar: 440,
+      explicit: [],
+      pseudo: [{ id: "pseudo.pseudo_total_life", min: 88 }],
+    });
+    expect(result).toMatchObject({
+      strategy: "market-properties",
+      marketProperty: "ar",
+      selectedModifierCount: 2,
+      minimumModifierCount: 2,
+    });
   } finally {
     Poe2Trade.getItemByAttributes = originalGetItemByAttributes;
   }
@@ -1114,9 +2573,7 @@ test("uses the fetched item class to categorize every item search", () => {
         frameType: 4,
         typeLine: "Healing Runes",
         baseType: "Healing Runes",
-        properties: [
-          { name: "Level", values: [["15", 0]], displayMode: 0 },
-        ],
+        properties: [{ name: "Level", values: [["15", 0]], displayMode: 0 }],
       },
       category: "gem",
     },
@@ -1195,9 +2652,7 @@ test("does not reuse a cached estimate from another item category", () => {
       rarity: "Rare",
       typeLine: "Ring Mail",
       baseType: "Ring Mail",
-      properties: [
-        { name: "Body Armour", values: [], displayMode: 0 },
-      ],
+      properties: [{ name: "Body Armour", values: [], displayMode: 0 }],
       explicitMods: [],
       implicitMods: [],
     },
@@ -1540,6 +2995,218 @@ test("detects when a modifier selection no longer matches its estimate", () => {
   ).toBe(false);
 });
 
+test("invalidates cached estimates created before expanded trade evidence", () => {
+  const item = {
+    item: {
+      baseType: "Fine Ring",
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      {
+        search: {
+          category: "accessory.ring",
+          modifierComparisonVersion: 7,
+        },
+      } as Estimate,
+      undefined,
+    ),
+  ).toBe(false);
+});
+
+test("does not reuse a cached estimate from another league", () => {
+  const item = {
+    item: {
+      baseType: "Fine Ring",
+      explicitMods: [],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+  const estimate = {
+    search: {
+      league: "Standard",
+      category: "accessory.ring",
+      modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+    },
+  } as Estimate;
+
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      estimate,
+      undefined,
+      DEFAULT_MODIFIER_RANGE_PERCENT,
+      "HC Runes of Aldur",
+    ),
+  ).toBe(false);
+});
+
+test("loads cached estimates only for the configured league", () => {
+  const originalGetJson = Cache.getJson;
+  Cache.getJson = () => ({
+    standard: { search: { league: "Standard" } } as Estimate,
+    hardcore: {
+      search: { league: "HC Runes of Aldur" },
+    } as Estimate,
+  });
+
+  try {
+    expect(Object.keys(PriceChecker.getCachedEstimates("HC Runes of Aldur")))
+      .toEqual(["hardcore"]);
+  } finally {
+    Cache.getJson = originalGetJson;
+  }
+});
+
+test("reuses market-property estimates only while DPS and selected modifiers match", () => {
+  const item = {
+    item: {
+      frameType: 2,
+      rarity: "Rare",
+      baseType: "Adherent Bow",
+      properties: [
+        { name: "Bows", values: [], displayMode: 0 },
+        { name: "Physical Damage", values: [["35-72", 0]], displayMode: 0 },
+        { name: "Lightning Damage", values: [["1-50", 0]], displayMode: 0 },
+        {
+          name: "Attacks per Second",
+          values: [["1.20", 0]],
+          displayMode: 0,
+        },
+      ],
+      explicitMods: [
+        {
+          description: "Adds 1 to 50 Lightning Damage",
+          hash: "explicit.stat_3336890334",
+          mods: [],
+        },
+        {
+          description: "100 to maximum Life",
+          hash: "explicit.stat_3299347043",
+          mods: [],
+        },
+      ],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+  const estimate = {
+    search: {
+      league: "HC Runes of Aldur",
+      category: "weapon.bow",
+      rarity: "nonunique",
+      strategy: "market-properties",
+      marketProperty: "dps",
+      marketPropertyMinimum: 83,
+      modifierRangePercent: 12,
+      modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+      explicitHashes: [
+        "explicit.stat_3336890334",
+        "explicit.stat_3299347043",
+      ],
+      implicitHashes: [],
+      enchantHashes: [],
+    },
+  } as Estimate;
+  const selection = { explicit: [true, true], implicit: [] };
+
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      estimate,
+      selection,
+      12,
+      "HC Runes of Aldur",
+    ),
+  ).toBe(true);
+
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      estimate,
+      { explicit: [true, false], implicit: [] },
+      12,
+      "HC Runes of Aldur",
+    ),
+  ).toBe(false);
+
+  item.item.properties = item.item.properties.map((property) =>
+    property.name === "Lightning Damage"
+      ? { ...property, values: [["1-100", 0]] }
+      : property,
+  );
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      estimate,
+      selection,
+      12,
+      "HC Runes of Aldur",
+    ),
+  ).toBe(false);
+});
+
+test("reuses market-pseudo estimates only for the aggregate modifier selection", () => {
+  const item = {
+    item: {
+      frameType: 2,
+      rarity: "Rare",
+      baseType: "Lapis Amulet",
+      properties: [{ name: "Amulets", values: [], displayMode: 0 }],
+      explicitMods: [
+        {
+          description: "100 to maximum Life",
+          hash: "explicit.stat_3299347043",
+          mods: [],
+        },
+        {
+          description: "25% to Fire Resistance",
+          hash: "explicit.stat_3372524247",
+          mods: [],
+        },
+      ],
+      implicitMods: [],
+    },
+  } as Poe2Item;
+  const estimate = {
+    search: {
+      league: "HC Runes of Aldur",
+      category: "accessory.amulet",
+      rarity: "nonunique",
+      strategy: "market-pseudos",
+      selectedModifierCount: 1,
+      minimumModifierCount: 1,
+      modifierRangePercent: 12,
+      modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+      explicitHashes: ["explicit.stat_3299347043"],
+      implicitHashes: [],
+      enchantHashes: [],
+    },
+  } as Estimate;
+
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      estimate,
+      { explicit: [true, false], implicit: [] },
+      12,
+      "HC Runes of Aldur",
+    ),
+  ).toBe(true);
+  expect(
+    PriceChecker.matchesModifierSelection(
+      item,
+      estimate,
+      { explicit: [true, true], implicit: [] },
+      12,
+      "HC Runes of Aldur",
+    ),
+  ).toBe(false);
+});
+
 test("matches cached estimates with the selected item-level filter", () => {
   const item = {
     item: {
@@ -1681,5 +3348,148 @@ test("normalizes comparables with mixed listed currencies", async () => {
     Poe2Trade.fetchItems = originalFetchItems;
     PriceChecker.fetchManyExchangeRates = originalFetchRates;
     PriceChecker.toEquivalentPrices = originalToEquivalentPrices;
+  }
+});
+
+test("keeps usable comparables when one listing currency cannot be converted", async () => {
+  const originalFetchItems = Poe2Trade.fetchItems;
+  const originalExchangeRate = PriceChecker.exchangeRate;
+  const ids = Array.from({ length: 8 }, (_value, index) => `item-${index}`);
+
+  Poe2Trade.fetchItems = async () =>
+    ({
+      result: ids.map((id, index) => ({
+        id,
+        listing: {
+          price: {
+            amount: index === ids.length - 1 ? 1 : 10 + index,
+            currency: index === ids.length - 1 ? "mirror" : "exalted",
+          },
+          account: { name: `seller-${index}` },
+        },
+      })),
+    }) as { result: Poe2Item[] };
+  PriceChecker.exchangeRate = async (_iWant, iHave) => {
+    if (iHave === "mirror") {
+      throw new Error("No exchange rate found for mirror to exalted.");
+    }
+    return 1;
+  };
+
+  try {
+    const prices = await PriceChecker.getPricesForItemIds(
+      ids,
+      "exalted",
+      "HC Runes of Aldur",
+      { minimumIndependentSellers: 7 },
+    );
+    const estimate = PriceChecker.priceEstimate(prices, {
+      minimumIndependentSellers: 7,
+    });
+
+    expect(estimate.comparables).toHaveLength(7);
+    expect(estimate.excludedByReason?.invalid).toBe(1);
+  } finally {
+    Poe2Trade.fetchItems = originalFetchItems;
+    PriceChecker.exchangeRate = originalExchangeRate;
+  }
+});
+
+test("fetches more trade listings until seven independent sellers are available", async () => {
+  const originalFetchItems = Poe2Trade.fetchItems;
+  const ids = Array.from({ length: 30 }, (_value, index) => `item-${index}`);
+  const requestedBatches: string[][] = [];
+
+  Poe2Trade.fetchItems = async (requestedIds) => {
+    requestedBatches.push([...requestedIds]);
+    return {
+      result: requestedIds.slice(0, 10).map((id) => {
+        const index = Number(id.split("-")[1]);
+        return {
+          id,
+          listing: {
+            indexed: new Date().toISOString(),
+            account: { name: index < 10 ? "shared-seller" : `seller-${index}` },
+            price: { amount: 10 + index, currency: "exalted" },
+          },
+        } as Poe2Item;
+      }),
+    };
+  };
+
+  try {
+    const prices = await PriceChecker.getPricesForItemIds(
+      ids,
+      "exalted",
+      "Standard",
+      { minimumIndependentSellers: 7, maxTradeListings: 100 },
+    );
+
+    expect(prices.some((price) => price.itemId === "item-10")).toBe(true);
+    expect(requestedBatches).toEqual([ids.slice(0, 10), ids.slice(10, 20)]);
+  } finally {
+    Poe2Trade.fetchItems = originalFetchItems;
+  }
+});
+
+test("caps expanded comparable fetching at one hundred listings", async () => {
+  const originalFetchItems = Poe2Trade.fetchItems;
+  const ids = Array.from({ length: 110 }, (_value, index) => `item-${index}`);
+  const requestedBatches: string[][] = [];
+
+  Poe2Trade.fetchItems = async (requestedIds) => {
+    requestedBatches.push([...requestedIds]);
+    return {
+      result: requestedIds.map((id, index) => ({
+        id,
+        listing: {
+          account: { name: "shared-seller" },
+          price: { amount: 10 + index, currency: "exalted" },
+        },
+      })) as Poe2Item[],
+    };
+  };
+
+  try {
+    await PriceChecker.getPricesForItemIds(ids, "exalted", "Standard", {
+      minimumIndependentSellers: 7,
+      maxTradeListings: 100,
+    });
+
+    expect(requestedBatches).toHaveLength(10);
+    expect(requestedBatches.at(-1)).toEqual(ids.slice(90, 100));
+    expect(requestedBatches.flat()).not.toContain("item-100");
+  } finally {
+    Poe2Trade.fetchItems = originalFetchItems;
+  }
+});
+
+test("uses the first twenty official listings for ordinary stash estimates", async () => {
+  const originalFetchItems = Poe2Trade.fetchItems;
+  const ids = Array.from({ length: 30 }, (_value, index) => `item-${index}`);
+  const requestedBatches: string[][] = [];
+
+  Poe2Trade.fetchItems = async (requestedIds) => {
+    requestedBatches.push([...requestedIds]);
+    return {
+      result: requestedIds.map((id, index) => ({
+        id,
+        listing: {
+          account: { name: `seller-${index}` },
+          price: { amount: 10 + index, currency: "exalted" },
+        },
+      })) as Poe2Item[],
+    };
+  };
+
+  try {
+    await PriceChecker.getPricesForItemIds(ids, "exalted", "Standard");
+
+    expect(requestedBatches).toEqual([
+      ids.slice(0, 10),
+      ids.slice(10, 20),
+    ]);
+  } finally {
+    Poe2Trade.fetchItems = originalFetchItems;
   }
 });

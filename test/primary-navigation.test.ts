@@ -25,6 +25,8 @@ test("names the primary navigation and identifies the current view", () => {
   const markup = renderMenu("BoostCoder#0407", "/messages");
 
   expect(markup).toContain('aria-label="Poe Dash home"');
+  expect(markup).toContain("divine-orb-logo.svg");
+  expect(markup).toContain('data-brand-mark="official-divine-orb"');
   expect(markup).toContain(">POE DASH<");
   expect(markup).toContain("Unofficial free community tool");
   expect(markup).toContain('aria-label="Primary navigation"');
@@ -41,4 +43,12 @@ test("removes duplicate live-watch and stash navigation controls", () => {
   expect(markup).not.toContain(">Live Watch<");
   expect(markup).not.toContain(">Stash<");
   expect(markup).not.toContain('aria-pressed="false"');
+});
+
+test("keeps live price checking available without an account", () => {
+  const markup = renderMenu("", "/price-check");
+
+  expect(markup).toContain('href="/price-check"');
+  expect(markup).toContain("Price Check");
+  expect(markup).toContain('aria-current="page"');
 });

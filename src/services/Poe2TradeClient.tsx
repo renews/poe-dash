@@ -10,8 +10,10 @@ import {
   ApiRequestQueue,
   ApiRequestRunOptions,
 } from "./ApiRequestQueue";
+import type { OfficialTradeStaticData } from "./OfficialExchangePricing";
 
 export const MIN_API_REQUEST_INTERVAL_MS = 2_500;
+export const TRADE_STATIC_CACHE_MS = 4 * 60 * 60 * 1_000;
 
 export function parseMirrorRateFromPage(html: string): number | undefined {
   const match = html.match(
@@ -89,6 +91,12 @@ export class Poe2TradeClient {
     maxRetries: 2,
     minIntervalMs: MIN_API_REQUEST_INTERVAL_MS,
   });
+  private readonly metadataRequests = new ApiRequestQueue({ maxRetries: 2 });
+  private tradeStaticDataCache?: {
+    expiresAt: number;
+    data: OfficialTradeStaticData;
+  };
+  private tradeStaticDataRequest?: Promise<OfficialTradeStaticData>;
   port = 7555;
   requestTimeout = 30_000;
   baseUrl = `http://localhost:${this.port}`;
@@ -381,6 +389,90 @@ export class Poe2TradeClient {
     return response.data as Poe2ExchangeSearch;
   }
 
+  async getTradeStaticData(options: ApiRequestRunOptions = {}) {
+    if (options.signal?.aborted) {
+      throw createAbortError();
+    }
+    if (
+      this.tradeStaticDataCache &&
+      this.tradeStaticDataCache.expiresAt > Date.now()
+    ) {
+      return this.tradeStaticDataCache.data;
+    }
+    if (this.tradeStaticDataRequest) {
+      return waitForRequest(this.tradeStaticDataRequest, options.signal);
+    }
+
+    const request = this.metadataRequests
+      .run(
+        () =>
+          axios.get(`${this.apiUrl}/data/static`, {
+            timeout: this.requestTimeout,
+          }),
+      )
+      .then((response) => {
+        const data = response.data as OfficialTradeStaticData;
+        this.tradeStaticDataCache = {
+          expiresAt: Date.now() + TRADE_STATIC_CACHE_MS,
+          data,
+        };
+        return data;
+      })
+      .finally(() => {
+        if (this.tradeStaticDataRequest === request) {
+          this.tradeStaticDataRequest = undefined;
+        }
+      });
+    this.tradeStaticDataRequest = request;
+    return waitForRequest(request, options.signal);
+  }
+
+  async getExchangeListings(
+    targetTag: string,
+    paymentTags: readonly string[],
+    league?: string,
+    options: ApiRequestRunOptions = {},
+  ) {
+    const target = targetTag.trim();
+    const payments = [
+      ...new Set(paymentTags.map((payment) => payment.trim()).filter(Boolean)),
+    ];
+    if (!target) {
+      throw new Error("An exchange target tag is required.");
+    }
+    if (payments.length === 0) {
+      throw new Error("At least one exchange payment tag is required.");
+    }
+
+    const url = `${this.apiUrl}/exchange/poe2/${league || this.league}`;
+    const payload = {
+      query: {
+        status: { option: "online" },
+        have: payments,
+        want: [target],
+      },
+      sort: { have: "asc" },
+      engine: "new",
+    };
+    console.log(
+      "Requesting exchange listings",
+      url,
+      "target",
+      target,
+      "payments",
+      payments,
+    );
+    const response = await this.requests.run(
+      () =>
+        axios.post(url, payload, {
+          timeout: this.requestTimeout,
+          signal: options.signal,
+        }),
+      options,
+    );
+    return response.data as Poe2ExchangeSearch;
+  }
+
   async getCurrencyExchangeOverview(
     league?: string,
     options: ApiRequestRunOptions = {},
@@ -432,3 +524,36 @@ export class Poe2TradeClient {
 }
 
 export const Poe2Client = new Poe2TradeClient();
+
+function waitForRequest<T>(request: Promise<T>, signal?: AbortSignal) {
+  if (!signal) {
+    return request;
+  }
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(createAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    request.then(
+      (result) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function createAbortError() {
+  const error = new Error("Request cancelled");
+  error.name = "AbortError";
+  return error;
+}

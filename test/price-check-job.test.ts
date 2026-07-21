@@ -96,7 +96,61 @@ test("refreshes a legacy cached suggestion when a listing crosses 13 days", asyn
     const progress = await priceCheck._task().next();
 
     expect(estimateCalls).toBe(1);
-    expect(progress.value?.data).toBe(refreshedEstimate);
+    expect(progress.value?.data.estimate).toBe(refreshedEstimate);
+  } finally {
+    PriceChecker.estimateItemPrice = originalEstimateItemPrice;
+    PriceChecker.getCachedEstimates = originalGetCachedEstimates;
+    PriceChecker.matchesModifierSelection = originalMatchesModifierSelection;
+  }
+});
+
+test("does not reuse an estimate that predates the item's last failed check", async () => {
+  const originalEstimateItemPrice = PriceChecker.estimateItemPrice;
+  const originalGetCachedEstimates = PriceChecker.getCachedEstimates;
+  const originalMatchesModifierSelection =
+    PriceChecker.matchesModifierSelection;
+  const failedItem = { ...item(), id: "failed-item" } as Poe2Item;
+  const cachedEstimate = {
+    checkedAt: Date.now() - 2_000,
+    price: { amount: 8, currency: "chaos" },
+    stdDev: { amount: 2, currency: "chaos" },
+    comparables: [],
+  } as Estimate;
+  const refreshedEstimate = {
+    ...cachedEstimate,
+    checkedAt: Date.now(),
+    price: { amount: 4, currency: "chaos" },
+  } as Estimate;
+  let estimateCalls = 0;
+
+  PriceChecker.getCachedEstimates = () => ({
+    [failedItem.id]: cachedEstimate,
+  });
+  PriceChecker.matchesModifierSelection = () => true;
+  PriceChecker.estimateItemPrice = async () => {
+    estimateCalls += 1;
+    return refreshedEstimate;
+  };
+
+  try {
+    const priceCheck = new PriceCheckAllItems(
+      [failedItem],
+      true,
+      undefined,
+      {},
+      5,
+      12,
+      {
+        [failedItem.id]: {
+          message: "No comparable listings found.",
+          failedAt: Date.now() - 1_000,
+        },
+      },
+    );
+    const progress = await priceCheck._task().next();
+
+    expect(estimateCalls).toBe(1);
+    expect(progress.value?.data.estimate).toBe(refreshedEstimate);
   } finally {
     PriceChecker.estimateItemPrice = originalEstimateItemPrice;
     PriceChecker.getCachedEstimates = originalGetCachedEstimates;
@@ -143,6 +197,67 @@ test("clears a failed item's error before checking the next item", async () => {
 
     expect(errorsAtItemStart).toEqual(["", ""]);
     expect(priceCheck.error).toBe("");
+  } finally {
+    priceChecker.estimateItemPrice = originalEstimate;
+    PriceChecker.getCachedEstimates = originalGetCachedEstimates;
+  }
+});
+
+test("reports a terminal outcome for every item when a price check partially fails", async () => {
+  const priceChecker = PriceChecker as unknown as {
+    estimateItemPrice: () => Promise<Estimate>;
+  };
+  const originalEstimate = priceChecker.estimateItemPrice;
+  const originalGetCachedEstimates = PriceChecker.getCachedEstimates;
+  const failedItem = { ...item(), id: "failed-item" } as Poe2Item;
+  const pricedItem = {
+    ...item({ typeLine: "Second Buckler" }),
+    id: "priced-item",
+  } as Poe2Item;
+  let attempt = 0;
+
+  PriceChecker.getCachedEstimates = () => ({});
+  priceChecker.estimateItemPrice = async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      throw new Error("No comparable listings found in the selected league.");
+    }
+
+    return {
+      price: { amount: 1, currency: "exalted" },
+      stdDev: { amount: 0, currency: "exalted" },
+      comparables: [],
+    } as Estimate;
+  };
+
+  try {
+    const outcomes = [];
+    const priceCheck = new PriceCheckAllItems(
+      [failedItem, pricedItem],
+      false,
+    );
+
+    for await (const progress of priceCheck._task()) {
+      outcomes.push(progress);
+    }
+
+    expect(outcomes).toHaveLength(2);
+    expect(outcomes[0]).toMatchObject({
+      current: 1,
+      total: 2,
+      data: {
+        item: { id: "failed-item" },
+        error: "No comparable listings found in the selected league.",
+      },
+    });
+    expect(outcomes[1]).toMatchObject({
+      current: 2,
+      total: 2,
+      data: {
+        item: { id: "priced-item" },
+        estimate: { price: { amount: 1, currency: "exalted" } },
+      },
+    });
   } finally {
     priceChecker.estimateItemPrice = originalEstimate;
     PriceChecker.getCachedEstimates = originalGetCachedEstimates;

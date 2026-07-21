@@ -61,6 +61,30 @@ test("honors Retry-After when retrying a throttled request", async () => {
   expect(states).toContain("retrying");
 });
 
+test("keeps the minimum interval between retry attempts", async () => {
+  let currentTime = 10_000;
+  const attemptStartedAt: number[] = [];
+  const queue = new ApiRequestQueue({
+    maxRetries: 1,
+    minIntervalMs: 2_500,
+    now: () => currentTime,
+    sleep: async (milliseconds) => {
+      currentTime += milliseconds;
+    },
+  });
+
+  const result = await queue.run(async () => {
+    attemptStartedAt.push(currentTime);
+    if (attemptStartedAt.length === 1) {
+      throw { response: { status: 429 } };
+    }
+    return "ok";
+  });
+
+  expect(result).toBe("ok");
+  expect(attemptStartedAt).toEqual([10_000, 12_500]);
+});
+
 test("cancels a request before it enters the queue", async () => {
   const queue = new ApiRequestQueue({ minIntervalMs: 0 });
   const controller = new AbortController();

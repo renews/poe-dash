@@ -3,6 +3,9 @@
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "Poe2Stash",
   "asar": true,
+  "asarUnpack": [
+    "node_modules/uiohook-napi/prebuilds/**/*"
+  ],
   "npmRebuild": false,
   "icon": "assets/icon",
   "productName": "Poe Dash",
@@ -14,12 +17,16 @@
     "dist-electron"
   ],
   "mac": {
+    "extendInfo": {
+      "NSAppleEventsUsageDescription": "Poe Dash verifies that Path of Exile is active before copying an item for a price check."
+    },
     "target": [
       "dmg"
     ],
     "artifactName": "${productName}-Mac-${version}-Installer.${ext}"
   },
   "win": {
+    "icon": "assets/icon.png",
     "target": [
       {
         "target": "nsis",

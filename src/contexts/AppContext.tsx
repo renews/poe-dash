@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useCallback,
+  useMemo,
   useRef,
   Dispatch,
   SetStateAction,
@@ -20,7 +21,6 @@ import {
 } from "../services/PriceEstimator";
 import { ModifierSelection, Poe2Item } from "../services/types";
 import { SyncAccount } from "../jobs/SyncAccount";
-import { RefreshAllItems } from "../jobs/RefreshAllItems";
 import { PriceCheckAllItems } from "../jobs/PriceCheckAllItems";
 import { Job } from "../jobs/Job";
 import { handleJob } from "../components/JobQueue";
@@ -29,12 +29,25 @@ import { NewItemTracker } from "../services/NewItemTracker";
 import { alertOnMispricedItem } from "../services/PriceAlert";
 import { useLiveListingMonitor } from "../hooks/useLiveListingMonitor";
 import { sortStashTabNames } from "../services/stashScope";
+import {
+  DEFAULT_PRICE_CHECK_SHORTCUT,
+  parsePriceCheckShortcut,
+} from "../services/priceCheckShortcut";
+import {
+  clearPriceCheckFailure,
+  getPriceCheckErrorMessages,
+  loadPriceCheckFailures,
+  persistPriceCheckFailures,
+  PriceCheckFailures,
+  recordPriceCheckFailure,
+} from "../services/priceCheckFailureState";
 
 export const MODIFIER_SELECTIONS_STORAGE_KEY = "modifierSelections";
 export const SELECTED_LEAGUE_STORAGE_KEY = "selectedLeague";
 export const MODIFIER_RANGE_PERCENT_STORAGE_KEY = "modifierRangePercent";
 export const OPEN_MARKET_INSPECTOR_ON_SELECT_STORAGE_KEY =
   "openMarketInspectorOnSelect";
+export const PRICE_CHECK_SHORTCUT_STORAGE_KEY = "priceCheckShortcut";
 
 export function parseSavedLeague(value: string | null): League {
   return Leagues.includes(value as League) ? (value as League) : Leagues[0];
@@ -61,6 +74,12 @@ export function parseSavedPriceCheckCooldown(value: string | null) {
 
 export function parseSavedOpenMarketInspectorOnSelect(value: string | null) {
   return value !== "false";
+}
+
+export function parseSavedPriceCheckShortcut(value: string | null) {
+  return value
+    ? parsePriceCheckShortcut(value)?.label || DEFAULT_PRICE_CHECK_SHORTCUT
+    : DEFAULT_PRICE_CHECK_SHORTCUT;
 }
 
 export function parseSavedAccountName(value: string | null) {
@@ -169,11 +188,14 @@ interface AppContextType {
   setModifierRangePercent: Dispatch<SetStateAction<number>>;
   openMarketInspectorOnSelect: boolean;
   setOpenMarketInspectorOnSelect: Dispatch<SetStateAction<boolean>>;
+  priceCheckShortcut: string;
+  setPriceCheckShortcut: Dispatch<SetStateAction<string>>;
   currencyRates: CurrencyRates;
   currencyRatesUpdatedAt: number | null;
   isRefreshingCurrencyRates: boolean;
   refreshCurrencyRates: () => Promise<void>;
   priceEstimates: Record<string, Estimate>;
+  priceCheckErrors: Record<string, string>;
   modifierSelections: Record<string, ModifierSelection>;
   setModifierSelection: (itemId: string, selection: ModifierSelection) => void;
   errorMessage: string | null;
@@ -189,7 +211,6 @@ interface AppContextType {
   priceCheckItems: (items: Poe2Item[]) => Promise<void>;
   refreshItem: (item: Poe2Item) => Promise<void>;
   refreshAllItems: () => Promise<void>;
-  priceCheckAllItems: () => Promise<void>;
   filteredItems: Poe2Item[];
 }
 
@@ -218,6 +239,16 @@ function getSavedOpenMarketInspectorOnSelect() {
 
   return parseSavedOpenMarketInspectorOnSelect(
     localStorage.getItem(OPEN_MARKET_INSPECTOR_ON_SELECT_STORAGE_KEY),
+  );
+}
+
+function getSavedPriceCheckShortcut() {
+  if (typeof localStorage === "undefined") {
+    return DEFAULT_PRICE_CHECK_SHORTCUT;
+  }
+
+  return parseSavedPriceCheckShortcut(
+    localStorage.getItem(PRICE_CHECK_SHORTCUT_STORAGE_KEY),
   );
 }
 
@@ -268,9 +299,23 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   );
   const [openMarketInspectorOnSelect, setOpenMarketInspectorOnSelect] =
     useState(getSavedOpenMarketInspectorOnSelect);
+  const [priceCheckShortcut, setPriceCheckShortcut] = useState(
+    getSavedPriceCheckShortcut,
+  );
   const [priceEstimates, setPriceEstimates] = useState<
     Record<string, Estimate>
   >({});
+  const priceCheckFailureScope = useRef(
+    getItemScope(getSavedAccountName(), getSavedLeague()),
+  );
+  const [priceCheckFailures, setPriceCheckFailures] =
+    useState<PriceCheckFailures>(() =>
+      loadPriceCheckFailures(priceCheckFailureScope.current),
+    );
+  const priceCheckErrors = useMemo(
+    () => getPriceCheckErrorMessages(priceCheckFailures),
+    [priceCheckFailures],
+  );
   const [modifierSelections, setModifierSelections] = useState<
     Record<string, ModifierSelection>
   >(loadModifierSelections);
@@ -287,6 +332,27 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   const backgroundPriceCheckQueue = useRef<Promise<void>>(Promise.resolve());
   const activeItemScope = useRef(getItemScope(accountName, selectedLeague));
   activeItemScope.current = getItemScope(syncedAccountName, selectedLeague);
+  const updatePriceCheckFailures = useCallback(
+    (
+      update: (current: PriceCheckFailures) => PriceCheckFailures,
+      scope = priceCheckFailureScope.current,
+    ) => {
+      if (scope !== priceCheckFailureScope.current) {
+        persistPriceCheckFailures(
+          scope,
+          update(loadPriceCheckFailures(scope)),
+        );
+        return;
+      }
+
+      setPriceCheckFailures((current) => {
+        const next = update(current);
+        persistPriceCheckFailures(scope, next);
+        return next;
+      });
+    },
+    [],
+  );
   const {
     isMonitoring: isLiveMonitoring,
     isStarting: isLiveMonitorStarting,
@@ -321,6 +387,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const priceCheckItems = async (itemsToCheck: Poe2Item[]) => {
     setIsPriceChecking(true);
+    const failureScope = priceCheckFailureScope.current;
     const priceCheck = new PriceCheckAllItems(
       itemsToCheck,
       true,
@@ -328,6 +395,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       modifierSelections,
       priceCheckCooldownMinutes,
       modifierRangePercent,
+      priceCheckFailures,
     );
 
     priceCheck.onCancel = async () => {
@@ -336,7 +404,18 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
 
     priceCheck.onStep = async (progress) => {
       console.log("price check", progress);
-      setPriceEstimates(PriceChecker.getCachedEstimates());
+      updatePriceCheckFailures(
+        (current) =>
+          progress.data.error
+            ? recordPriceCheckFailure(
+                current,
+                progress.data.item.id,
+                progress.data.error,
+              )
+            : clearPriceCheckFailure(current, progress.data.item.id),
+        failureScope,
+      );
+      setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
     };
 
     priceCheck.onItemStart = () => {
@@ -345,7 +424,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
 
     try {
       await handleJob(priceCheck, setJobs, setErrorMessage);
-      setPriceEstimates(PriceChecker.getCachedEstimates());
+      setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
     } finally {
       setIsPriceChecking(false);
     }
@@ -372,6 +451,9 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
 
     try {
       await handleJob(sync, setJobs, setErrorMessage);
+      if (sync.status !== "done") {
+        return;
+      }
 
       const accountItems = await Poe2Trade.getAllCachedAccountItems(
         name,
@@ -405,14 +487,35 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     item: Poe2Item,
     selection = modifierSelections[item.id],
   ) => {
-    const price = await PriceChecker.estimateItemPrice(
-      item,
-      selectedLeague,
-      selection,
-      modifierRangePercent,
-    );
-    setPriceEstimates(PriceChecker.getCachedEstimates());
-    console.log(price);
+    const failureScope = priceCheckFailureScope.current;
+
+    try {
+      const price = await PriceChecker.estimateItemPrice(
+        item,
+        selectedLeague,
+        selection,
+        modifierRangePercent,
+      );
+      setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
+      updatePriceCheckFailures(
+        (current) => clearPriceCheckFailure(current, item.id),
+        failureScope,
+      );
+      console.log(price);
+    } catch (error) {
+      PriceChecker.removeCachedEstimate(item.id);
+      setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
+      updatePriceCheckFailures(
+        (current) =>
+          recordPriceCheckFailure(
+            current,
+            item.id,
+            error instanceof Error ? error.message : "Price check failed.",
+          ),
+        failureScope,
+      );
+      throw error;
+    }
   };
 
   const refreshItem = async (item: Poe2Item) => {
@@ -430,21 +533,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const refreshAllItems = async () => {
-    const refresh = new RefreshAllItems(
-      accountName,
-      filteredItems,
-      selectedLeague,
-    );
-
-    refresh.onStep = async (progress) => {
-      setItems(progress.data);
-    };
-
-    await handleJob(refresh, setJobs, setErrorMessage);
-  };
-
-  const priceCheckAllItems = async () => {
-    await priceCheckItems(filteredItems);
+    await getItems(accountName);
   };
 
   const filterItems = (items: Poe2Item[], stash: string, search: string) => {
@@ -477,7 +566,9 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     };
 
-    setPriceEstimates(PriceChecker.getCachedEstimates());
+    setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
+    priceCheckFailureScope.current = scope;
+    setPriceCheckFailures(loadPriceCheckFailures(scope));
     setLoadedItemsScope(null);
 
     if (accountName) {
@@ -521,9 +612,30 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
               selection,
               rangePercent,
             );
-            setPriceEstimates(PriceChecker.getCachedEstimates());
+            setPriceEstimates(
+              PriceChecker.getCachedEstimates(selectedLeague),
+            );
+            updatePriceCheckFailures(
+              (current) => clearPriceCheckFailure(current, item.id),
+              scope,
+            );
             await alertOnMispricedItem(item, estimate, selectedLeague);
           } catch (error) {
+            PriceChecker.removeCachedEstimate(item.id);
+            setPriceEstimates(
+              PriceChecker.getCachedEstimates(selectedLeague),
+            );
+            updatePriceCheckFailures(
+              (current) =>
+                recordPriceCheckFailure(
+                  current,
+                  item.id,
+                  error instanceof Error
+                    ? error.message
+                    : "Price check failed.",
+                ),
+              scope,
+            );
             console.error(
               `Automatic price check failed for ${item.item?.name || item.item?.typeLine || item.id}`,
               error,
@@ -540,6 +652,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     modifierSelections,
     selectedLeague,
     syncedAccountName,
+    updatePriceCheckFailures,
   ]);
 
   useEffect(() => {
@@ -572,6 +685,15 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
       openMarketInspectorOnSelect.toString(),
     );
   }, [openMarketInspectorOnSelect]);
+
+  useEffect(() => {
+    localStorage.setItem(PRICE_CHECK_SHORTCUT_STORAGE_KEY, priceCheckShortcut);
+    void window.desktopApi?.priceCheck
+      ?.setShortcut(priceCheckShortcut)
+      .catch((error) =>
+        console.error("Unable to update the live price check shortcut", error),
+      );
+  }, [priceCheckShortcut]);
 
   useEffect(() => {
     localStorage.setItem(SELECTED_LEAGUE_STORAGE_KEY, selectedLeague);
@@ -611,11 +733,14 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     setModifierRangePercent,
     openMarketInspectorOnSelect,
     setOpenMarketInspectorOnSelect,
+    priceCheckShortcut,
+    setPriceCheckShortcut,
     currencyRates,
     currencyRatesUpdatedAt,
     isRefreshingCurrencyRates,
     refreshCurrencyRates,
     priceEstimates,
+    priceCheckErrors,
     modifierSelections,
     setModifierSelection,
     errorMessage,
@@ -628,7 +753,6 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     priceCheckItems,
     refreshItem,
     refreshAllItems,
-    priceCheckAllItems,
     filteredItems,
   };
 

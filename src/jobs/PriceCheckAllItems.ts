@@ -9,11 +9,21 @@ import {
 import { ModifierSelection, Poe2Item } from "../services/types";
 import { ApiRequestState } from "../services/ApiRequestQueue";
 import { hasCurrentListingSuggestionPriceFactor } from "../services/listingPricePolicy";
+import {
+  isEstimateNewerThanFailure,
+  PriceCheckFailures,
+} from "../services/priceCheckFailureState";
 
 export type PriceCheckItemProgress = {
   current: number;
   total: number;
   item: Poe2Item;
+};
+
+export type PriceCheckItemOutcome = {
+  item: Poe2Item;
+  estimate?: Estimate;
+  error?: string;
 };
 
 export function getPriceCheckItemName(item: Poe2Item) {
@@ -44,7 +54,7 @@ export function getApiRequestProgressLabel(state: ApiRequestState) {
   return null;
 }
 
-export class PriceCheckAllItems extends Job<Estimate> {
+export class PriceCheckAllItems extends Job<PriceCheckItemOutcome> {
   onItemStart: (progress: PriceCheckItemProgress) => Promise<void> | void =
     async () => {};
   onRequestState: (state: ApiRequestState) => void = () => {};
@@ -56,6 +66,7 @@ export class PriceCheckAllItems extends Job<Estimate> {
     private modifierSelections: Record<string, ModifierSelection> = {},
     private cooldownMinutes = DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES,
     private modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
+    private priceCheckFailures: PriceCheckFailures = {},
   ) {
     super(
       "price-check-items",
@@ -65,7 +76,7 @@ export class PriceCheckAllItems extends Job<Estimate> {
   }
 
   async *_task() {
-    const cached = PriceChecker.getCachedEstimates();
+    const cached = PriceChecker.getCachedEstimates(this.league);
     for (let i = 0; i < this.filteredItems.length; i++) {
       const item = this.filteredItems[i];
       this.error = "";
@@ -86,18 +97,23 @@ export class PriceCheckAllItems extends Job<Estimate> {
           item.listing?.indexed,
           cachedEstimate.listingAgeAdjustmentFactor,
         ) &&
+        isEstimateNewerThanFailure(
+          cachedEstimate,
+          this.priceCheckFailures[item.id],
+        ) &&
         PriceChecker.matchesModifierSelection(
           item,
           cachedEstimate,
           modifierSelection,
           this.modifierRangePercent,
+          this.league,
         );
 
       if (canUseCachedEstimate) {
         yield {
           total: this.filteredItems.length,
           current: i + 1,
-          data: cachedEstimate,
+          data: { item, estimate: cachedEstimate },
         };
       } else {
         try {
@@ -114,11 +130,17 @@ export class PriceCheckAllItems extends Job<Estimate> {
           yield {
             total: this.filteredItems.length,
             current: i + 1,
-            data: price,
+            data: { item, estimate: price },
           };
         } catch (error: unknown) {
           console.error(error);
+          PriceChecker.removeCachedEstimate(item.id);
           this.error = getPriceCheckErrorMessage(error);
+          yield {
+            total: this.filteredItems.length,
+            current: i + 1,
+            data: { item, error: this.error },
+          };
         }
       }
     }

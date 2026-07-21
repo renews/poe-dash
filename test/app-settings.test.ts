@@ -5,6 +5,7 @@ import {
   parseSavedModifierRange,
   parseSavedOpenMarketInspectorOnSelect,
   parseSavedPriceCheckCooldown,
+  parseSavedPriceCheckShortcut,
 } from "../src/contexts/AppContext";
 import {
   canStartAccountSync,
@@ -46,6 +47,15 @@ test("opens the market inspector on item selection by default", () => {
   expect(parseSavedOpenMarketInspectorOnSelect("invalid")).toBe(true);
 });
 
+test("restores only supported live price-check shortcuts", () => {
+  expect(parseSavedPriceCheckShortcut("Ctrl+Shift+P")).toBe("Ctrl+Shift+P");
+  expect(parseSavedPriceCheckShortcut("shift + ctrl + p")).toBe(
+    "Ctrl+Shift+P",
+  );
+  expect(parseSavedPriceCheckShortcut("P")).toBe("Ctrl+D");
+  expect(parseSavedPriceCheckShortcut(null)).toBe("Ctrl+D");
+});
+
 test("exposes the market inspector behavior in configuration", async () => {
   const source = await Bun.file(
     `${import.meta.dir}/../src/components/ConfigurationPage.tsx`,
@@ -53,6 +63,8 @@ test("exposes the market inspector behavior in configuration", async () => {
 
   expect(source).toContain("Open Market Inspector when selecting an item");
   expect(source).toContain("setOpenMarketInspectorOnSelect");
+  expect(source).toContain("Live price check shortcut");
+  expect(source).toContain("setPriceCheckShortcut");
 });
 
 test("opens configuration when no account is configured", () => {

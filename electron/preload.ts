@@ -1,6 +1,14 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { createBufferedPriceCheckChannel } from "./app/priceCheckClipboard";
 
 type WindowControlAction = "minimize" | "toggle-maximize" | "close";
+
+const bufferedPriceChecks = createBufferedPriceCheckChannel();
+ipcRenderer.on("price-check-item-copied", (_event, value: unknown) => {
+  if (typeof value === "string") {
+    bufferedPriceChecks.publish(value);
+  }
+});
 
 contextBridge.exposeInMainWorld("windowControls", {
   perform(action: WindowControlAction) {
@@ -20,6 +28,28 @@ contextBridge.exposeInMainWorld("windowControls", {
 });
 
 contextBridge.exposeInMainWorld("desktopApi", {
+  priceCheck: {
+    getShortcutStatus() {
+      return ipcRenderer.invoke("price-check-shortcut-status") as Promise<{
+        registered: boolean;
+        shortcut: string;
+        error?: string;
+      }>;
+    },
+    setShortcut(shortcut: string) {
+      return ipcRenderer.invoke(
+        "price-check-shortcut-update",
+        shortcut,
+      ) as Promise<{
+        registered: boolean;
+        shortcut: string;
+        error?: string;
+      }>;
+    },
+    onItemCopied(callback: (itemText: string) => void) {
+      return bufferedPriceChecks.subscribe(callback);
+    },
+  },
   merchantHistory: {
     getSession() {
       return ipcRenderer.invoke("poe-get-session") as Promise<unknown>;

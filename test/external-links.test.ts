@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   createMerchantHistoryUrl,
+  createTradeExchangeUrl,
   createTradeSearchUrl,
   isAllowedExternalUrl,
 } from "../src/services/externalLinks";
@@ -16,6 +17,15 @@ test("builds and validates official trade search links", () => {
     isAllowedExternalUrl("https://example.com/trade2/search/poe2/test"),
   ).toBe(false);
   expect(isAllowedExternalUrl("not a URL")).toBe(false);
+});
+
+test("builds and validates an exact official currency exchange link", () => {
+  const url = createTradeExchangeUrl("Runes of Aldur", "exchange/123");
+
+  expect(url).toBe(
+    "https://www.pathofexile.com/trade2/exchange/poe2/Runes%20of%20Aldur/exchange%2F123",
+  );
+  expect(isAllowedExternalUrl(url)).toBe(true);
 });
 
 test("builds an official Ange merchant history link", () => {

@@ -30,6 +30,10 @@ import {
 } from "./pricePosition";
 import { getItemCategory } from "./itemCategory";
 import { getListingSuggestionPriceFactor } from "./listingPricePolicy";
+import {
+  getOfficialExchangePrice,
+  resolveOfficialTradeTag,
+} from "./OfficialExchangePricing";
 
 function rethrowIfRequestCancelled(
   error: unknown,
@@ -59,8 +63,12 @@ export type Estimate = {
   excludedComparableCount?: number;
   excludedByReason?: Record<ComparableExclusionReason, number>;
   confidence?: PriceConfidence;
-  source?: "official-trade" | "poe2scout";
-  method?: "median" | "market-history" | "market-current";
+  source?: "official-trade" | "poe2scout" | "currency-exchange";
+  method?:
+    | "median"
+    | "market-history"
+    | "market-current"
+    | "exchange-median";
   market?: Poe2ScoutMarketValuation;
   search: {
     league?: string;
@@ -71,14 +79,28 @@ export type Estimate = {
     itemLevel?: number;
     requiredLevelMin?: number;
     requiredLevelMax?: number;
-    strategy?: "strict" | "one-mod-relaxed";
+    strategy?:
+      | "market-properties"
+      | "market-pseudos"
+      | "strict"
+      | "one-mod-relaxed"
+      | "modifier-count-relaxed"
+      | "exchange-exact";
+    marketProperty?: "dps" | "pdps" | "edps" | "ar" | "ev" | "es";
+    marketPropertyMinimum?: number;
+    searchId?: string;
+    tradeTag?: string;
+    paymentCurrency?: string;
     selectedModifierCount?: number;
     minimumModifierCount?: number;
     modifierComparisonVersion?: number;
     explicitCount: number;
     implicitCount?: number;
+    enchantCount?: number;
     explicitHashes?: string[];
     implicitHashes?: string[];
+    enchantHashes?: string[];
+    corrupted?: "true" | "false";
     modifierRangePercent?: number;
   };
 };
@@ -87,11 +109,33 @@ export const DEFAULT_PRICE_CHECK_COOLDOWN_MINUTES = 5;
 export const MIN_MODIFIER_RANGE_PERCENT = 5;
 export const MAX_MODIFIER_RANGE_PERCENT = 100;
 export const DEFAULT_MODIFIER_RANGE_PERCENT = 12;
+export const DEFAULT_MINIMUM_INDEPENDENT_SELLERS = 1;
+export const DEFAULT_MINIMUM_TRADE_LISTINGS = 20;
+export const DEFAULT_MAX_TRADE_LISTINGS = 100;
 export const CURRENCY_RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
-export const MODIFIER_COMPARISON_VERSION = 7;
+export const MODIFIER_COMPARISON_VERSION = 9;
 
 const CURRENCY_IDS = ["exalted", "chaos", "divine", "mirror"] as const;
+const SUPPORTED_TRADE_RARITIES = new Set([
+  "normal",
+  "magic",
+  "rare",
+  "unique",
+  "uniquefoil",
+  "nonunique",
+]);
 export type CurrencyRates = Record<string, number>;
+
+export interface PriceEstimateRequestOptions extends ApiRequestRunOptions {
+  applyListingContext?: boolean;
+  recordResult?: boolean;
+  minimumIndependentSellers?: number;
+  maxTradeListings?: number;
+}
+
+export interface PriceAnalysisOptions {
+  minimumIndependentSellers?: number;
+}
 
 export type ParsedItemMod = {
   mod: string;
@@ -99,7 +143,22 @@ export type ParsedItemMod = {
   value1: number | undefined;
   value2?: number;
   hash: string;
+  sourceIndex?: number;
 };
+
+export type UnresolvedItemModifier = {
+  section: "explicit" | "implicit" | "enchant";
+  sourceIndex: number;
+  text: string;
+};
+
+type ModifierSelectionWithEnchants = ModifierSelection & {
+  enchant?: boolean[];
+};
+
+function getEnchantSelection(selection?: ModifierSelection) {
+  return (selection as ModifierSelectionWithEnchants | undefined)?.enchant;
+}
 
 type SearchModifier = {
   id: string;
@@ -157,7 +216,16 @@ export function selectSelectedModifiers<T>(
   modifiers: T[],
   selection?: boolean[],
 ) {
-  return modifiers.filter((_modifier, index) => selection?.[index] !== false);
+  return modifiers.filter((modifier, index) => {
+    const sourceIndex =
+      modifier &&
+      typeof modifier === "object" &&
+      "sourceIndex" in modifier &&
+      typeof modifier.sourceIndex === "number"
+        ? modifier.sourceIndex
+        : index;
+    return selection?.[sourceIndex] !== false;
+  });
 }
 
 export function roundCurrencyAmount(amount: number) {
@@ -211,6 +279,35 @@ function isMinimumOnlyModifier(modifier: ParsedItemMod) {
     text.includes("gem") ||
     (text.includes("level of") && text.includes("skill"))
   );
+}
+
+function getModifierComparisonValue(modifier: ParsedItemMod) {
+  if (modifier.value1 === undefined) {
+    return undefined;
+  }
+
+  return Number.isFinite(modifier.value2)
+    ? (modifier.value1 + modifier.value2!) / 2
+    : modifier.value1;
+}
+
+function buildExactModifierSearchFilters(
+  modifiers: ParsedItemMod[],
+  modifierRangePercent: number,
+) {
+  return modifiers.map((modifier) => {
+    const comparisonValue = getModifierComparisonValue(modifier);
+    return {
+      id: modifier.hash,
+      ...(comparisonValue !== undefined
+        ? getModifierSearchRange(
+            comparisonValue,
+            isMinimumOnlyModifier(modifier),
+            modifierRangePercent,
+          )
+        : {}),
+    };
+  });
 }
 
 function getResistanceCount(text: string) {
@@ -293,11 +390,12 @@ export function buildModifierSearchFilters(
         continue;
       }
 
+      const comparisonValue = getModifierComparisonValue(modifier);
       target.push({
         id: modifier.hash,
-        ...(modifier.value1 !== undefined
+        ...(comparisonValue !== undefined
           ? getModifierSearchRange(
-              modifier.value1,
+              comparisonValue,
               isMinimumOnlyModifier(modifier),
               modifierRangePercent,
             )
@@ -328,6 +426,416 @@ function getNumericItemProperty(item: Poe2Item, name: string) {
   return numericValue === undefined ? undefined : Number(numericValue);
 }
 
+function getAverageItemPropertyValue(item: Poe2Item, name: string) {
+  const property = item.item?.properties?.find(
+    (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+  );
+  const averages = (property?.values || []).flatMap(([value]) => {
+    const numbers = value.match(/\d+(?:\.\d+)?/g)?.map(Number) || [];
+    if (!numbers.length) return [];
+    return [
+      numbers.reduce((total, number) => total + number, 0) / numbers.length,
+    ];
+  });
+
+  return averages.length
+    ? averages.reduce((total, average) => total + average, 0)
+    : undefined;
+}
+
+function getAwakenedWeaponSearch(
+  item: Poe2Item,
+  metadata: ReturnType<typeof getItemSearchMetadata>,
+  modifierRangePercent: number,
+  includeItemLevel = false,
+  requiredLevelRange?: RequiredLevelRange,
+): Poe2ItemSearch | undefined {
+  if (
+    metadata.rarity !== "rare" ||
+    !metadata.category?.startsWith("weapon.")
+  ) {
+    return undefined;
+  }
+
+  const attacksPerSecond = getNumericItemProperty(item, "Attacks per Second");
+  if (!attacksPerSecond || attacksPerSecond <= 0) {
+    return undefined;
+  }
+
+  const physicalDamage = getAverageItemPropertyValue(item, "Physical Damage");
+  const combinedElementalDamage = getAverageItemPropertyValue(
+    item,
+    "Elemental Damage",
+  );
+  const elementalDamage =
+    combinedElementalDamage ??
+    ["Fire Damage", "Cold Damage", "Lightning Damage"].reduce(
+      (total, name) =>
+        total + (getAverageItemPropertyValue(item, name) || 0),
+      0,
+    );
+  const physicalDps = (physicalDamage || 0) * attacksPerSecond;
+  const elementalDps = elementalDamage * attacksPerSecond;
+  const totalDps = physicalDps + elementalDps;
+  if (totalDps <= 0) {
+    return undefined;
+  }
+
+  const range = (value: number) =>
+    getModifierSearchRange(value, false, modifierRangePercent).min;
+  const damageFilter =
+    physicalDps > 0 && elementalDps > 0
+      ? { dps: range(totalDps) }
+      : physicalDps > 0
+        ? { pdps: range(physicalDps) }
+        : { edps: range(elementalDps) };
+
+  return {
+    status: "securable",
+    rarity: "nonunique",
+    category: metadata.category,
+    ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
+    ...getItemSearchFilters(
+      metadata,
+      includeItemLevel,
+      requiredLevelRange,
+    ),
+    ...damageFilter,
+    explicit: [],
+    implicit: [],
+    pseudo: [],
+  };
+}
+
+function getAwakenedArmourSearch(
+  item: Poe2Item,
+  metadata: ReturnType<typeof getItemSearchMetadata>,
+  modifierRangePercent: number,
+  includeItemLevel = false,
+  requiredLevelRange?: RequiredLevelRange,
+): Poe2ItemSearch | undefined {
+  if (
+    metadata.rarity !== "rare" ||
+    !metadata.category?.startsWith("armour.")
+  ) {
+    return undefined;
+  }
+
+  const defenceProperties = [
+    { property: "ar" as const, value: getNumericItemProperty(item, "Armour") },
+    {
+      property: "ev" as const,
+      value: getNumericItemProperty(item, "Evasion Rating"),
+    },
+    {
+      property: "es" as const,
+      value: getNumericItemProperty(item, "Energy Shield"),
+    },
+  ].filter(
+    (entry): entry is { property: "ar" | "ev" | "es"; value: number } =>
+      typeof entry.value === "number" && entry.value > 0,
+  );
+  if (defenceProperties.length !== 1) {
+    return undefined;
+  }
+
+  const [{ property, value }] = defenceProperties;
+  return {
+    status: "securable",
+    rarity: "nonunique",
+    category: metadata.category,
+    ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
+    ...getItemSearchFilters(
+      metadata,
+      includeItemLevel,
+      requiredLevelRange,
+    ),
+    [property]: getModifierSearchRange(
+      value,
+      false,
+      modifierRangePercent,
+    ).min,
+    explicit: [],
+    implicit: [],
+    pseudo: [],
+  };
+}
+
+function getAwakenedPropertySearch(
+  item: Poe2Item,
+  metadata: ReturnType<typeof getItemSearchMetadata>,
+  modifierRangePercent: number,
+  includeItemLevel = false,
+  requiredLevelRange?: RequiredLevelRange,
+) {
+  return (
+    getAwakenedWeaponSearch(
+      item,
+      metadata,
+      modifierRangePercent,
+      includeItemLevel,
+      requiredLevelRange,
+    ) ||
+    getAwakenedArmourSearch(
+      item,
+      metadata,
+      modifierRangePercent,
+      includeItemLevel,
+      requiredLevelRange,
+    )
+  );
+}
+
+function getMarketPropertyFilter(search: Poe2ItemSearch) {
+  for (const property of ["dps", "pdps", "edps", "ar", "ev", "es"] as const) {
+    const minimum = search[property];
+    if (minimum !== undefined) {
+      return { property, minimum };
+    }
+  }
+
+  return undefined;
+}
+
+const AWAKENED_PSEUDO_MODIFIER_IDS = {
+  life: "pseudo.pseudo_total_life",
+  energyShield: "pseudo.pseudo_total_energy_shield",
+  elementalResistance: "pseudo.pseudo_total_elemental_resistance",
+  chaosResistance: "pseudo.pseudo_total_chaos_resistance",
+} as const;
+
+type AwakenedPseudoKind = keyof typeof AWAKENED_PSEUDO_MODIFIER_IDS;
+
+function getAwakenedPseudoContributions(modifier: ParsedItemMod) {
+  if (modifier.value1 === undefined) {
+    return [] as Array<{ kind: AwakenedPseudoKind; value: number }>;
+  }
+
+  const text = `${modifier.mod} ${modifier.parsed}`.toLowerCase();
+  const isConditional =
+    text.includes("increased") ||
+    text.includes("regenerat") ||
+    text.includes("recover") ||
+    text.includes("gain") ||
+    text.includes("per socket") ||
+    text.includes("while ");
+
+  if (text.includes("maximum life") && !isConditional) {
+    return [{ kind: "life" as const, value: modifier.value1 }];
+  }
+
+  if (text.includes("maximum energy shield") && !isConditional) {
+    return [{ kind: "energyShield" as const, value: modifier.value1 }];
+  }
+
+  const isResistance =
+    text.includes("resistance") &&
+    !text.includes("maximum") &&
+    !text.includes("penetrat") &&
+    !text.includes("damage") &&
+    !text.includes("enemy") &&
+    !text.includes("minion") &&
+    !text.includes("ally") &&
+    !text.includes("overcapped") &&
+    !text.includes("unaffected");
+  if (!isResistance) {
+    return [];
+  }
+
+  const allResistances = text.includes("all resistances");
+  const allElementalResistances = text.includes("all elemental resistances");
+  const elementalCount =
+    allResistances || allElementalResistances
+      ? 3
+      : ["fire", "cold", "lightning"].filter((type) => text.includes(type))
+          .length;
+  const includesChaos = allResistances || text.includes("chaos");
+  return [
+    ...(elementalCount
+      ? [
+          {
+            kind: "elementalResistance" as const,
+            value: modifier.value1 * elementalCount,
+          },
+        ]
+      : []),
+    ...(includesChaos
+      ? [{ kind: "chaosResistance" as const, value: modifier.value1 }]
+      : []),
+  ];
+}
+
+function isWeaponPropertyModifier(modifier: ParsedItemMod) {
+  const text = `${modifier.mod} ${modifier.parsed}`.toLowerCase();
+  return (
+    (/adds .* to .* (?:physical|fire|cold|lightning) damage/.test(text) &&
+      !text.includes("spell")) ||
+    text.includes("increased physical damage") ||
+    text.includes("increased attack speed") ||
+    text.includes("increased critical strike chance")
+  );
+}
+
+function isArmourPropertyModifier(modifier: ParsedItemMod) {
+  const text = `${modifier.mod} ${modifier.parsed}`.toLowerCase();
+  return (
+    /increased (?:armour|evasion rating|energy shield)/.test(text) ||
+    /to (?:armour|evasion rating|maximum energy shield)/.test(text)
+  );
+}
+
+function isMarketPropertyModifier(
+  modifier: ParsedItemMod,
+  category: string,
+) {
+  return category.startsWith("weapon.")
+    ? isWeaponPropertyModifier(modifier)
+    : category.startsWith("armour.")
+      ? isArmourPropertyModifier(modifier)
+      : false;
+}
+
+function buildAwakenedModifierSearchFilters(
+  explicit: ParsedItemMod[],
+  implicit: ParsedItemMod[],
+  enchant: ParsedItemMod[],
+  modifierRangePercent: number,
+): ModifierSearchFilters {
+  const filters: ModifierSearchFilters = {
+    explicit: [],
+    implicit: [],
+    pseudo: [],
+  };
+  const pseudoTotals = new Map<AwakenedPseudoKind, number>();
+
+  const addModifiers = (
+    modifiers: ParsedItemMod[],
+    target: SearchModifier[],
+  ) => {
+    for (const modifier of modifiers) {
+      const contributions = getAwakenedPseudoContributions(modifier);
+      if (contributions.length) {
+        for (const contribution of contributions) {
+          pseudoTotals.set(
+            contribution.kind,
+            (pseudoTotals.get(contribution.kind) || 0) + contribution.value,
+          );
+        }
+        continue;
+      }
+
+      const comparisonValue = getModifierComparisonValue(modifier);
+      target.push({
+        id: modifier.hash,
+        ...(comparisonValue !== undefined
+          ? {
+              min: getModifierSearchRange(
+                comparisonValue,
+                false,
+                modifierRangePercent,
+              ).min,
+            }
+          : {}),
+      });
+    }
+  };
+
+  addModifiers(explicit, filters.explicit);
+  addModifiers(implicit, filters.implicit);
+  addModifiers(enchant, filters.explicit);
+
+  for (const [kind, value] of pseudoTotals) {
+    filters.pseudo.push({
+      id: AWAKENED_PSEUDO_MODIFIER_IDS[kind],
+      min: getModifierSearchRange(
+        value,
+        false,
+        modifierRangePercent,
+      ).min,
+    });
+  }
+
+  return filters;
+}
+
+type AwakenedRareSearch = {
+  search: Poe2ItemSearch;
+  modifierCount: number;
+  propertyFilter?: ReturnType<typeof getMarketPropertyFilter>;
+};
+
+function getAwakenedRareSearch(
+  item: Poe2Item,
+  metadata: ReturnType<typeof getItemSearchMetadata>,
+  selectedExplicits: ParsedItemMod[],
+  selectedImplicits: ParsedItemMod[],
+  selectedEnchants: ParsedItemMod[],
+  modifierRangePercent: number,
+  includeItemLevel = false,
+  requiredLevelRange?: RequiredLevelRange,
+): AwakenedRareSearch | undefined {
+  if (metadata.rarity !== "rare" || !metadata.category) {
+    return undefined;
+  }
+  const category = metadata.category;
+
+  const propertySearch = getAwakenedPropertySearch(
+    item,
+    metadata,
+    modifierRangePercent,
+    includeItemLevel,
+    requiredLevelRange,
+  );
+  const hasMarketProperty = Boolean(propertySearch);
+  const modifierFilters = buildAwakenedModifierSearchFilters(
+    hasMarketProperty
+      ? selectedExplicits.filter((modifier) =>
+          !isMarketPropertyModifier(modifier, category),
+        )
+      : selectedExplicits,
+    hasMarketProperty
+      ? selectedImplicits.filter((modifier) =>
+          !isMarketPropertyModifier(modifier, category),
+        )
+      : selectedImplicits,
+    selectedEnchants,
+    modifierRangePercent,
+  );
+  const modifierCount = [
+    ...modifierFilters.explicit,
+    ...modifierFilters.implicit,
+    ...modifierFilters.pseudo,
+  ].length;
+  if (!propertySearch && modifierCount === 0) {
+    return undefined;
+  }
+
+  const search: Poe2ItemSearch = {
+    ...(propertySearch || {
+      status: "securable" as const,
+      rarity: "nonunique",
+      category,
+      ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
+      ...getItemSearchFilters(
+        metadata,
+        includeItemLevel,
+        requiredLevelRange,
+      ),
+    }),
+    ...modifierFilters,
+  };
+
+  return {
+    search,
+    modifierCount,
+    propertyFilter: getMarketPropertyFilter(search),
+  };
+}
+
+export function getItemGemLevel(item: Poe2Item) {
+  return item.item?.gemLevel ?? getNumericItemProperty(item, "Level");
+}
+
 export function getItemRequiredLevel(item: Poe2Item) {
   const requirement = item.item?.requirements?.find(
     (entry) => entry.name?.trim().toLowerCase() === "level",
@@ -347,11 +855,15 @@ export function getItemSearchMetadata(item: Poe2Item) {
   const rawRarity =
     item.item?.rarity || frameRarities[item.item?.frameType ?? -1];
   const baseType = item.item?.baseType || item.item?.typeLine;
-  const gemLevel = item.item?.gemLevel ?? getNumericItemProperty(item, "Level");
+  const gemLevel = getItemGemLevel(item);
   const quality = item.item?.quality ?? getNumericItemProperty(item, "Quality");
   const isGem = isGemItem(item);
   const requiredLevel = isGem ? undefined : getItemRequiredLevel(item);
-  const rarity = isGem ? undefined : rawRarity?.toLowerCase();
+  const normalizedRarity = rawRarity?.toLowerCase();
+  const rarity =
+    !isGem && normalizedRarity && SUPPORTED_TRADE_RARITIES.has(normalizedRarity)
+      ? normalizedRarity
+      : undefined;
   const category = getItemCategory(item, isGem);
 
   return {
@@ -368,6 +880,9 @@ export function getItemSearchMetadata(item: Poe2Item) {
     ...(requiredLevel !== undefined ? { requiredLevel } : {}),
     ...(gemLevel !== undefined ? { gemLevel } : {}),
     ...(quality !== undefined ? { quality } : {}),
+    ...(item.origin === "clipboard"
+      ? { corrupted: item.item?.corrupted ? "true" as const : "false" as const }
+      : {}),
   };
 }
 
@@ -418,7 +933,7 @@ export function getRequiredLevelSearchRange(
 
 export function isGemItem(item: Poe2Item) {
   const rarity = item.item?.rarity?.toLowerCase();
-  const gemLevel = item.item?.gemLevel ?? getNumericItemProperty(item, "Level");
+  const gemLevel = getItemGemLevel(item);
   return (
     item.item?.frameType === 4 || rarity === "gem" || gemLevel !== undefined
   );
@@ -455,6 +970,7 @@ class PriceEstimator {
     metadata: ReturnType<typeof getItemSearchMetadata>,
     selectedExplicits: ParsedItemMod[],
     selectedImplicits: ParsedItemMod[],
+    selectedEnchants: ParsedItemMod[],
     topN: number,
     includeItemLevel: boolean,
     requiredLevelRange?: RequiredLevelRange,
@@ -469,6 +985,11 @@ class PriceEstimator {
           topN,
         )
       : { explicit: [], implicit: selectedImplicits };
+    const modifierFilters = buildModifierSearchFilters(
+      explicit,
+      implicit,
+      modifierRangePercent,
+    );
 
     return {
       status: "securable",
@@ -478,16 +999,20 @@ class PriceEstimator {
         ? {}
         : { baseType: metadata.baseType }),
       ...(metadata.category ? { category: metadata.category } : {}),
+      ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
       ...getItemSearchFilters(
         metadata,
         includeItemLevel,
         requiredLevelRange,
       ),
-      ...buildModifierSearchFilters(
-        explicit,
-        implicit,
-        modifierRangePercent,
-      ),
+      ...modifierFilters,
+      explicit: [
+        ...modifierFilters.explicit,
+        ...buildExactModifierSearchFilters(
+          selectedEnchants,
+          modifierRangePercent,
+        ),
+      ],
     };
   }
 
@@ -496,9 +1021,10 @@ class PriceEstimator {
     league?: string,
     modifierSelection?: ModifierSelection,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
-    options: ApiRequestRunOptions = {},
+    options: PriceEstimateRequestOptions = {},
+    isMatchSufficient?: (match: Poe2TradeSearch) => Promise<boolean>,
   ): Promise<Poe2TradeSearch> {
-    const itemLeague = item.item?.league || league;
+    const itemLeague = league || item.item?.league;
     const metadata = getItemSearchMetadata(item);
     const { baseType } = metadata;
     if (!baseType && metadata.rarity !== "rare") {
@@ -517,6 +1043,10 @@ class PriceEstimator {
       parsedMods.implicits || [],
       modifierSelection?.implicit,
     );
+    const selectedEnchants = selectSelectedModifiers(
+      parsedMods.enchants || [],
+      getEnchantSelection(modifierSelection),
+    );
     const gem = isGemItem(item);
     const includeItemLevel = !gem && modifierSelection?.itemLevel === true;
     const requiredLevelRange = gem
@@ -526,11 +1056,119 @@ class PriceEstimator {
           modifierSelection,
         );
 
+    const desiredComparableCount = Math.max(
+      1,
+      Math.round(
+        options.minimumIndependentSellers ??
+          DEFAULT_MINIMUM_INDEPENDENT_SELLERS,
+      ),
+    );
+    const comparableCount = (match: Poe2TradeSearch) =>
+      (match.result || []).filter((id) => !item.id || id !== item.id).length;
+    const hasEnoughEvidence = async (match: Poe2TradeSearch) =>
+      comparableCount(match) >= desiredComparableCount &&
+      (!isMatchSufficient || (await isMatchSufficient(match)));
+
+    const awakenedSearch = getAwakenedRareSearch(
+      item,
+      metadata,
+      selectedExplicits,
+      selectedImplicits,
+      selectedEnchants,
+      modifierRangePercent,
+      includeItemLevel,
+      requiredLevelRange,
+    );
+    if (awakenedSearch) {
+      const propertyCount = awakenedSearch.propertyFilter ? 1 : 0;
+      const selectedMarketCount =
+        awakenedSearch.modifierCount + propertyCount;
+      const strategy = awakenedSearch.propertyFilter
+        ? ("market-properties" as const)
+        : ("market-pseudos" as const);
+      const toMarketMatch = (
+        match: Poe2TradeSearch,
+        minimumModifierCount: number,
+      ): Poe2TradeSearch => ({
+        ...match,
+        strategy,
+        ...(awakenedSearch.propertyFilter
+          ? {
+              marketProperty: awakenedSearch.propertyFilter.property,
+              marketPropertyMinimum: awakenedSearch.propertyFilter.minimum,
+            }
+          : {}),
+        selectedModifierCount: selectedMarketCount,
+        minimumModifierCount: minimumModifierCount + propertyCount,
+      });
+
+      let marketMatch = await Poe2Trade.getItemByAttributes(
+        awakenedSearch.search,
+        itemLeague,
+        options,
+      );
+      if (await hasEnoughEvidence(marketMatch)) {
+        return toMarketMatch(marketMatch, awakenedSearch.modifierCount);
+      }
+
+      const minimumMarketModifierCount = awakenedSearch.propertyFilter ? 0 : 1;
+      for (
+        let requiredModifierCount = awakenedSearch.modifierCount - 1;
+        requiredModifierCount >= minimumMarketModifierCount;
+        requiredModifierCount -= 1
+      ) {
+        const relaxedMarketSearch: Poe2ItemSearch =
+          requiredModifierCount === 0
+            ? {
+                ...awakenedSearch.search,
+                explicit: [],
+                implicit: [],
+                pseudo: [],
+                statGroupType: undefined,
+                statGroupMin: undefined,
+              }
+            : {
+                ...awakenedSearch.search,
+                statGroupType: "count",
+                statGroupMin: requiredModifierCount,
+              };
+        marketMatch = await Poe2Trade.getItemByAttributes(
+          relaxedMarketSearch,
+          itemLeague,
+          options,
+        );
+        if (await hasEnoughEvidence(marketMatch)) {
+          return toMarketMatch(marketMatch, requiredModifierCount);
+        }
+      }
+    }
+
+    const copiedModifierCount =
+      (item.item?.explicitMods || []).length +
+      (item.item?.implicitMods || []).length +
+      (item.item?.enchantMods || []).length;
+    const requiresModifierMatch =
+      item.item?.frameType === 1 || item.item?.frameType === 2;
+    if (
+      item.origin === "clipboard" &&
+      requiresModifierMatch &&
+      copiedModifierCount > 0 &&
+      selectedExplicits.length +
+        selectedImplicits.length +
+        selectedEnchants.length ===
+        0
+    ) {
+      throw new Error(
+        "Selected modifiers cannot be matched to current trade data. Deselect unsupported modifiers or update the local trade data before retrying.",
+      );
+    }
+
     const strictSearch = await this.getComparableSearchParams(
       item,
       metadata,
       selectedExplicits,
       selectedImplicits,
+      selectedEnchants,
       selectedExplicits.length,
       includeItemLevel,
       requiredLevelRange,
@@ -546,11 +1184,11 @@ class PriceEstimator {
       itemLeague,
       options,
     );
-    const hasStrictComparable = (strictMatch.result || []).some(
-      (id) => !item.id || id !== item.id,
-    );
 
-    if (hasStrictComparable || selectedModifierCount < 2) {
+    if (
+      (await hasEnoughEvidence(strictMatch)) ||
+      selectedModifierCount < 2
+    ) {
       return {
         ...strictMatch,
         strategy: "strict",
@@ -559,20 +1197,37 @@ class PriceEstimator {
       };
     }
 
-    const minimumModifierCount = selectedModifierCount - 1;
-    const relaxedMatch = await Poe2Trade.getItemByAttributes(
-      {
-        ...strictSearch,
-        statGroupType: "count",
-        statGroupMin: minimumModifierCount,
-      },
-      itemLeague,
-      options,
-    );
+    const minimumSafeModifierCount = selectedModifierCount === 2 ? 1 : 2;
+    let relaxedMatch = strictMatch;
+    let minimumModifierCount = selectedModifierCount;
+
+    for (
+      let requiredModifierCount = selectedModifierCount - 1;
+      requiredModifierCount >= minimumSafeModifierCount;
+      requiredModifierCount -= 1
+    ) {
+      minimumModifierCount = requiredModifierCount;
+      relaxedMatch = await Poe2Trade.getItemByAttributes(
+        {
+          ...strictSearch,
+          statGroupType: "count",
+          statGroupMin: minimumModifierCount,
+        },
+        itemLeague,
+        options,
+      );
+
+      if (await hasEnoughEvidence(relaxedMatch)) {
+        break;
+      }
+    }
 
     return {
       ...relaxedMatch,
-      strategy: "one-mod-relaxed",
+      strategy:
+        selectedModifierCount - minimumModifierCount === 1
+          ? "one-mod-relaxed"
+          : "modifier-count-relaxed",
       selectedModifierCount,
       minimumModifierCount,
     };
@@ -583,9 +1238,9 @@ class PriceEstimator {
     league?: string,
     modifierSelection?: ModifierSelection,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
-    options: ApiRequestRunOptions = {},
+    options: PriceEstimateRequestOptions = {},
   ) {
-    const itemLeague = item.item?.league || league;
+    const itemLeague = league || item.item?.league;
     const metadata = getItemSearchMetadata(item);
     const { baseType, name, rarity } = metadata;
     if (!baseType && metadata.rarity !== "rare") {
@@ -604,6 +1259,10 @@ class PriceEstimator {
       parsedMods.implicits || [],
       modifierSelection?.implicit,
     );
+    const selectedEnchants = selectSelectedModifiers(
+      parsedMods.enchants || [],
+      getEnchantSelection(modifierSelection),
+    );
     const gem = isGemItem(item);
     const includeItemLevel = !gem && modifierSelection?.itemLevel === true;
     const requiredLevelRange = gem
@@ -615,133 +1274,132 @@ class PriceEstimator {
     console.log("Estimating price for item in league:", league);
 
     const currency = "exalted";
-
-    const marketValuationPromise = Poe2Scout.getMarketValuation(
+    const exchangeEstimate = await this.getOfficialExchangeEstimate(
       item,
       itemLeague,
+      metadata,
+      selectedExplicits,
+      selectedImplicits,
+      selectedEnchants,
+      modifierRangePercent,
       options,
     );
-    const tradeComparablesPromise = (async () => {
-      // Keep the official comparables in exact parity with the Search button.
-      const matchingItems = await this.findMatchingItem(
+    if (exchangeEstimate) {
+      return this.finishEstimate(item, exchangeEstimate, itemLeague, options);
+    }
+
+    let tradeSearch: Poe2TradeSearch | undefined;
+    let allPrices: ComparablePrice[] = [];
+    let tradeEstimate:
+      | ReturnType<PriceEstimator["priceEstimate"]>
+      | undefined;
+    let officialTradeError: unknown;
+
+    try {
+      let lastEvaluatedSearchId: string | undefined;
+      const evaluateTradeMatch = async (match: Poe2TradeSearch) => {
+        lastEvaluatedSearchId = match.id;
+        const filtered = (match.result || []).filter((id) => id !== item.id);
+        allPrices = await this.getPricesForItemIds(
+          filtered,
+          currency,
+          itemLeague,
+          options,
+        );
+        if (allPrices.length) {
+          await this.fetchManyExchangeRates(
+            currency,
+            allPrices.map((price) => price.currency),
+            itemLeague,
+            options,
+          );
+        }
+
+        try {
+          tradeEstimate = this.priceEstimate(allPrices, {
+            minimumIndependentSellers:
+              options.minimumIndependentSellers ??
+              DEFAULT_MINIMUM_INDEPENDENT_SELLERS,
+          });
+          officialTradeError = undefined;
+          return true;
+        } catch (error) {
+          officialTradeError = error;
+          tradeEstimate = undefined;
+          return false;
+        }
+      };
+
+      tradeSearch = await this.findMatchingItem(
         item,
         itemLeague,
         modifierSelection,
         modifierRangePercent,
         options,
+        evaluateTradeMatch,
       );
-      const filtered = (matchingItems.result || []).filter(
-        (id) => id !== item.id,
+      if (lastEvaluatedSearchId !== tradeSearch.id) {
+        await evaluateTradeMatch(tradeSearch);
+      }
+    } catch (error) {
+      rethrowIfRequestCancelled(error, options);
+      officialTradeError = error;
+      console.warn(
+        "Official trade pricing was unavailable; trying Poe2Scout",
+        error,
       );
-      return {
-        matchingItems,
-        prices: await this.getPricesForItemIds(
-          filtered,
-          currency,
+    }
+
+    if (!tradeEstimate) {
+      try {
+        const marketValuation = await Poe2Scout.getMarketValuation(
+          item,
           itemLeague,
           options,
-        ),
-      };
-    })();
-    const [marketResult, tradeResult] = await Promise.allSettled([
-      marketValuationPromise,
-      tradeComparablesPromise,
-    ]);
+        );
+        if (marketValuation) {
+          const fallbackEstimate = this.createMarketOnlyEstimate(
+            marketValuation,
+            itemLeague,
+            metadata,
+            selectedExplicits,
+            selectedImplicits,
+            selectedEnchants,
+            modifierRangePercent,
+          );
+          fallbackEstimate.sourceComparableCount = allPrices.length;
+          return this.finishEstimate(
+            item,
+            fallbackEstimate,
+            itemLeague,
+            options,
+          );
+        }
+      } catch (error) {
+        rethrowIfRequestCancelled(error, options);
+        console.warn("Unable to fetch Poe2Scout fallback valuation", error);
+      }
 
-    if (options.signal?.aborted) {
-      const cancelledResult = [marketResult, tradeResult].find(
-        (result) => result.status === "rejected",
-      );
-      throw cancelledResult?.status === "rejected"
-        ? cancelledResult.reason
-        : new Error("Request cancelled");
-    }
-
-    const marketValuation =
-      marketResult.status === "fulfilled" ? marketResult.value : undefined;
-    if (marketResult.status === "rejected") {
-      console.warn(
-        "Unable to fetch Poe2Scout market valuation; using trade comparables",
-        marketResult.reason,
-      );
-    }
-
-    if (tradeResult.status === "rejected" && !marketValuation) {
-      throw tradeResult.reason;
-    }
-    if (tradeResult.status === "rejected") {
-      console.warn(
-        "Unable to fetch official trade comparables; using Poe2Scout valuation",
-        tradeResult.reason,
+      throw (
+        officialTradeError ||
+        new Error("No comparable listings found in the selected league.")
       );
     }
 
-    const tradeSearch =
-      tradeResult.status === "fulfilled"
-        ? tradeResult.value.matchingItems
-        : undefined;
-    const allPrices =
-      tradeResult.status === "fulfilled" ? tradeResult.value.prices : [];
-
-    if (allPrices.length) {
-      await this.fetchManyExchangeRates(
-        currency,
-        allPrices.map((p) => p.currency),
-        itemLeague,
-        options,
-      );
-    }
-    const tradeEstimate = allPrices.length
-      ? this.priceEstimate(allPrices)
-      : undefined;
-    if (!marketValuation && !tradeEstimate) {
-      throw new Error("No comparable listings found in the selected league.");
-    }
-
-    const hasSpecificSearchFilters =
-      (tradeSearch?.selectedModifierCount || 0) > 0 ||
-      includeItemLevel ||
-      requiredLevelRange !== undefined ||
-      metadata.gemLevel !== undefined ||
-      metadata.quality !== undefined;
-    const useTradeAsPrimary =
-      tradeEstimate !== undefined &&
-      (marketValuation === undefined || hasSpecificSearchFilters);
-
+    const usesAwakenedMarket =
+      tradeSearch?.strategy === "market-properties" ||
+      tradeSearch?.strategy === "market-pseudos";
     const estimate: Estimate = {
       checkedAt: Date.now(),
-      ...(tradeEstimate || {
-        price: marketValuation!.price,
-        stdDev: { amount: 0, currency: marketValuation!.price.currency },
-        comparables: [],
-        sourceComparableCount: 0,
-        excludedComparableCount: 0,
-      }),
-      ...(useTradeAsPrimary
-        ? {
-            source: "official-trade" as const,
-            method: "median" as const,
-          }
-        : marketValuation
-        ? {
-            source: "poe2scout" as const,
-            method:
-              marketValuation.method === "current-snapshot"
-                ? ("market-current" as const)
-                : ("market-history" as const),
-            price: marketValuation.price,
-          }
-        : {
-            source: "official-trade" as const,
-            method: "median" as const,
-          }),
-      ...(marketValuation ? { market: marketValuation } : {}),
+      ...tradeEstimate,
+      source: "official-trade",
+      method: "median",
       search: {
         league: itemLeague,
         baseType,
         category: metadata.category,
         name,
-        rarity,
+        rarity: usesAwakenedMarket ? "nonunique" : rarity,
         ...(includeItemLevel && metadata.itemLevel !== undefined
           ? { itemLevel: metadata.itemLevel }
           : {}),
@@ -758,11 +1416,20 @@ class PriceEstimator {
               minimumModifierCount: tradeSearch.minimumModifierCount,
             }
           : {}),
+        ...(tradeSearch?.strategy === "market-properties"
+          ? {
+              marketProperty: tradeSearch.marketProperty,
+              marketPropertyMinimum: tradeSearch.marketPropertyMinimum,
+            }
+          : {}),
         modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
         explicitCount: selectedExplicits.length,
         implicitCount: selectedImplicits.length,
+        enchantCount: selectedEnchants.length,
         explicitHashes: selectedExplicits.map((modifier) => modifier.hash),
         implicitHashes: selectedImplicits.map((modifier) => modifier.hash),
+        enchantHashes: selectedEnchants.map((modifier) => modifier.hash),
+        ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
         modifierRangePercent: normalizeModifierRangePercent(
           modifierRangePercent,
         ),
@@ -770,27 +1437,216 @@ class PriceEstimator {
     };
 
     if (
-      useTradeAsPrimary &&
-      tradeSearch?.strategy === "one-mod-relaxed"
+      tradeSearch?.strategy === "one-mod-relaxed" ||
+      tradeSearch?.strategy === "modifier-count-relaxed" ||
+      (usesAwakenedMarket &&
+        (tradeSearch?.minimumModifierCount || 0) <
+          (tradeSearch?.selectedModifierCount || 0))
     ) {
       estimate.confidence = "low";
     }
 
-    const listingAgeAdjustmentFactor = getListingSuggestionPriceFactor(
-      item.listing?.indexed,
+    console.log({ allPrices, estimate, item });
+    return this.finishEstimate(item, estimate, itemLeague, options);
+  }
+
+  private isCurrencyExchangeCandidate(
+    item: Poe2Item,
+    metadata: ReturnType<typeof getItemSearchMetadata>,
+    selectedExplicits: ParsedItemMod[],
+    selectedImplicits: ParsedItemMod[],
+    selectedEnchants: ParsedItemMod[],
+  ) {
+    const category = metadata.category || "";
+    return (
+      item.origin === "clipboard" &&
+      (item.item?.frameType === 5 ||
+        category === "currency" ||
+        category.startsWith("currency.")) &&
+      selectedExplicits.length +
+        selectedImplicits.length +
+        selectedEnchants.length ===
+        0
     );
-    estimate.listingAgeAdjustmentFactor = listingAgeAdjustmentFactor;
-    if (listingAgeAdjustmentFactor !== 1) {
-      const precisePrice = getPrecisePrice(estimate.price);
-      const preciseSpread = getPrecisePrice(estimate.stdDev);
-      estimate.price = {
-        amount: precisePrice.amount * listingAgeAdjustmentFactor,
-        currency: precisePrice.currency,
+  }
+
+  private createMarketOnlyEstimate(
+    marketValuation: Poe2ScoutMarketValuation,
+    itemLeague: string | undefined,
+    metadata: ReturnType<typeof getItemSearchMetadata>,
+    selectedExplicits: ParsedItemMod[],
+    selectedImplicits: ParsedItemMod[],
+    selectedEnchants: ParsedItemMod[],
+    modifierRangePercent: number,
+  ): Estimate {
+    return {
+      checkedAt: Date.now(),
+      price: marketValuation.price,
+      stdDev: { amount: 0, currency: marketValuation.price.currency },
+      comparables: [],
+      sourceComparableCount: 0,
+      excludedComparableCount: 0,
+      source: "poe2scout",
+      method:
+        marketValuation.method === "current-snapshot"
+          ? "market-current"
+          : "market-history",
+      market: marketValuation,
+      search: {
+        league: itemLeague,
+        baseType: metadata.baseType,
+        category: metadata.category,
+        name: metadata.name,
+        rarity: metadata.rarity,
+        modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+        explicitCount: selectedExplicits.length,
+        implicitCount: selectedImplicits.length,
+        enchantCount: selectedEnchants.length,
+        explicitHashes: selectedExplicits.map((modifier) => modifier.hash),
+        implicitHashes: selectedImplicits.map((modifier) => modifier.hash),
+        enchantHashes: selectedEnchants.map((modifier) => modifier.hash),
+        ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
+        modifierRangePercent: normalizeModifierRangePercent(
+          modifierRangePercent,
+        ),
+      },
+    };
+  }
+
+  private async getOfficialExchangeEstimate(
+    item: Poe2Item,
+    itemLeague: string | undefined,
+    metadata: ReturnType<typeof getItemSearchMetadata>,
+    selectedExplicits: ParsedItemMod[],
+    selectedImplicits: ParsedItemMod[],
+    selectedEnchants: ParsedItemMod[],
+    modifierRangePercent: number,
+    options: PriceEstimateRequestOptions,
+  ): Promise<Estimate | undefined> {
+    if (
+      !this.isCurrencyExchangeCandidate(
+        item,
+        metadata,
+        selectedExplicits,
+        selectedImplicits,
+        selectedEnchants,
+      )
+    ) {
+      return undefined;
+    }
+
+    const visibleIdentity = (
+      item.item?.baseType ||
+      item.item?.typeLine ||
+      item.item?.name ||
+      ""
+    ).trim();
+    if (!visibleIdentity) {
+      return undefined;
+    }
+
+    try {
+      const resolution = resolveOfficialTradeTag(
+        await Poe2Trade.client.getTradeStaticData(options),
+        visibleIdentity,
+      );
+      if (resolution.status !== "resolved") {
+        return undefined;
+      }
+
+      const paymentCurrencies = ["exalted", "chaos", "divine"].filter(
+        (currency) => currency !== resolution.tag,
+      );
+      const exchangePrice = getOfficialExchangePrice(
+        await Poe2Trade.client.getExchangeListings(
+          resolution.tag,
+          paymentCurrencies,
+          itemLeague,
+          options,
+        ),
+        resolution.tag,
+        paymentCurrencies,
+      );
+      if (!exchangePrice) {
+        return undefined;
+      }
+
+      return {
+        checkedAt: Date.now(),
+        price: {
+          amount: exchangePrice.amount,
+          currency: exchangePrice.currency,
+        },
+        stdDev: { amount: 0, currency: exchangePrice.currency },
+        comparables: [],
+        sourceComparableCount: exchangePrice.sellerCount,
+        excludedComparableCount: 0,
+        confidence:
+          exchangePrice.sellerCount >= 8
+            ? "high"
+            : exchangePrice.sellerCount >= 4
+              ? "medium"
+              : "low",
+        source: "currency-exchange",
+        method: "exchange-median",
+        search: {
+          league: itemLeague,
+          baseType: metadata.baseType,
+          category: metadata.category,
+          name: metadata.name,
+          rarity: metadata.rarity,
+          strategy: "exchange-exact",
+          searchId: exchangePrice.searchId,
+          tradeTag: exchangePrice.targetTag,
+          paymentCurrency: exchangePrice.currency,
+          selectedModifierCount: 0,
+          minimumModifierCount: 0,
+          modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+          explicitCount: 0,
+          implicitCount: 0,
+          enchantCount: 0,
+          explicitHashes: [],
+          implicitHashes: [],
+          enchantHashes: [],
+          ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
+          modifierRangePercent: normalizeModifierRangePercent(
+            modifierRangePercent,
+          ),
+        },
       };
-      estimate.stdDev = {
-        amount: preciseSpread.amount * listingAgeAdjustmentFactor,
-        currency: preciseSpread.currency,
-      };
+    } catch (error) {
+      rethrowIfRequestCancelled(error, options);
+      console.warn(
+        "Unable to use official currency exchange pricing; continuing with lower fallbacks",
+        error,
+      );
+      return undefined;
+    }
+  }
+
+  private async finishEstimate(
+    item: Poe2Item,
+    estimate: Estimate,
+    itemLeague: string | undefined,
+    options: PriceEstimateRequestOptions,
+  ) {
+    if (options.applyListingContext !== false) {
+      const listingAgeAdjustmentFactor = getListingSuggestionPriceFactor(
+        item.listing?.indexed,
+      );
+      estimate.listingAgeAdjustmentFactor = listingAgeAdjustmentFactor;
+      if (listingAgeAdjustmentFactor !== 1) {
+        const precisePrice = getPrecisePrice(estimate.price);
+        const preciseSpread = getPrecisePrice(estimate.stdDev);
+        estimate.price = {
+          amount: precisePrice.amount * listingAgeAdjustmentFactor,
+          currency: precisePrice.currency,
+        };
+        estimate.stdDev = {
+          amount: preciseSpread.amount * listingAgeAdjustmentFactor,
+          currency: preciseSpread.currency,
+        };
+      }
     }
 
     estimate.price = await this.upscalePrice(estimate.price, itemLeague, options);
@@ -801,18 +1657,20 @@ class PriceEstimator {
         options,
       );
     }
-    estimate.matchesCurrentPrice = await this.matchesCurrentPrice(
-      item,
-      estimate.price,
-      itemLeague,
-      options,
-      estimate.stdDev,
-    );
+    if (options.applyListingContext !== false) {
+      estimate.matchesCurrentPrice = await this.matchesCurrentPrice(
+        item,
+        estimate.price,
+        itemLeague,
+        options,
+        estimate.stdDev,
+      );
+    }
 
-    console.log({ allPrices, estimate, item });
-
-    this.cachePriceEstimate(item.item.id, estimate);
-    recordPriceSnapshot(item, estimate);
+    if (options.recordResult !== false) {
+      this.cachePriceEstimate(item.item.id, estimate);
+      recordPriceSnapshot(item, estimate);
+    }
     return estimate;
   }
 
@@ -821,6 +1679,7 @@ class PriceEstimator {
     estimate: Estimate,
     modifierSelection?: ModifierSelection,
     modifierRangePercent = DEFAULT_MODIFIER_RANGE_PERCENT,
+    league?: string,
   ) {
     if (
       estimate.search?.modifierComparisonVersion !== MODIFIER_COMPARISON_VERSION
@@ -828,7 +1687,16 @@ class PriceEstimator {
       return false;
     }
 
-    if (estimate.search?.category !== getItemSearchMetadata(item).category) {
+    if (league !== undefined && estimate.search?.league !== league) {
+      return false;
+    }
+
+    const metadata = getItemSearchMetadata(item);
+    if (estimate.search?.category !== metadata.category) {
+      return false;
+    }
+
+    if (estimate.search?.corrupted !== metadata.corrupted) {
       return false;
     }
 
@@ -863,34 +1731,83 @@ class PriceEstimator {
       return false;
     }
 
-    if (!modifierSelection) {
-      return true;
+    const parsedMods = this.parseItemMods(item);
+    const selectedExplicits = selectSelectedModifiers(
+      parsedMods.explicits || [],
+      modifierSelection?.explicit,
+    );
+    const selectedImplicits = selectSelectedModifiers(
+      parsedMods.implicits || [],
+      modifierSelection?.implicit,
+    );
+    const selectedEnchants = selectSelectedModifiers(
+      parsedMods.enchants || [],
+      getEnchantSelection(modifierSelection),
+    );
+
+    if (
+      estimate.search?.strategy === "market-properties" ||
+      estimate.search?.strategy === "market-pseudos"
+    ) {
+      const marketSearch = getAwakenedRareSearch(
+        item,
+        metadata,
+        selectedExplicits,
+        selectedImplicits,
+        selectedEnchants,
+        modifierRangePercent,
+        selectedItemLevel !== undefined,
+        selectedRequiredLevelRange,
+      );
+      const currentStrategy = marketSearch?.propertyFilter
+        ? "market-properties"
+        : marketSearch
+          ? "market-pseudos"
+          : undefined;
+      if (currentStrategy !== estimate.search.strategy) {
+        return false;
+      }
+      const marketProperty = marketSearch?.propertyFilter;
+      if (
+        currentStrategy === "market-properties" &&
+        (marketProperty?.property !== estimate.search.marketProperty ||
+          marketProperty?.minimum !==
+            estimate.search.marketPropertyMinimum)
+      ) {
+        return false;
+      }
     }
 
     const expectedExplicitHashes = estimate.search?.explicitHashes;
     const expectedImplicitHashes = estimate.search?.implicitHashes;
+    const expectedEnchantHashes =
+      estimate.search?.enchantHashes ||
+      (parsedMods.enchants.length === 0 ? [] : undefined);
     if (
       !Array.isArray(expectedExplicitHashes) ||
-      !Array.isArray(expectedImplicitHashes)
+      !Array.isArray(expectedImplicitHashes) ||
+      !Array.isArray(expectedEnchantHashes)
     ) {
       return false;
     }
 
-    const parsedMods = this.parseItemMods(item);
-    const selectedExplicitHashes = selectSelectedModifiers(
-      parsedMods.explicits || [],
-      modifierSelection.explicit,
-    ).map((modifier) => normalizeModifierHash(modifier.hash));
-    const selectedImplicitHashes = selectSelectedModifiers(
-      parsedMods.implicits || [],
-      modifierSelection.implicit,
-    ).map((modifier) => normalizeModifierHash(modifier.hash));
+    const selectedExplicitHashes = selectedExplicits.map((modifier) =>
+      normalizeModifierHash(modifier.hash),
+    );
+    const selectedImplicitHashes = selectedImplicits.map((modifier) =>
+      normalizeModifierHash(modifier.hash),
+    );
+    const selectedEnchantHashes = selectedEnchants.map((modifier) =>
+      normalizeModifierHash(modifier.hash),
+    );
 
     return (
       selectedExplicitHashes.join("|") ===
         expectedExplicitHashes.map(normalizeModifierHash).join("|") &&
       selectedImplicitHashes.join("|") ===
-        expectedImplicitHashes.map(normalizeModifierHash).join("|")
+        expectedImplicitHashes.map(normalizeModifierHash).join("|") &&
+      selectedEnchantHashes.join("|") ===
+        expectedEnchantHashes.map(normalizeModifierHash).join("|")
     );
   }
 
@@ -988,34 +1905,74 @@ class PriceEstimator {
     ids: string[],
     currency = "exalted",
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: PriceEstimateRequestOptions = {},
   ): Promise<ComparablePrice[]> {
-    const items = await Poe2Trade.fetchItems(ids, options);
-    const fetchedItems = items.result || [];
-
-    const currencies = Poe2Trade.toUniqueItems(
-      fetchedItems
-        .map((i) => i.listing.price.currency)
-        .concat(fetchedItems.map((i) => i.listing.price.currency)),
+    const maximumListings = Math.min(
+      DEFAULT_MAX_TRADE_LISTINGS,
+      Math.max(
+        10,
+        Math.round(
+          options.maxTradeListings ?? DEFAULT_MAX_TRADE_LISTINGS,
+        ),
+      ),
     );
-    await this.fetchManyExchangeRates(currency, currencies, league, options);
-
-    const prices = this.toEquivalentPrices(
-      currency,
-      fetchedItems.map((i) => ({
-        amount: i.listing.price.amount,
-        currency: i.listing.price.currency,
-      })),
-      league,
+    const minimumListings = Math.min(
+      maximumListings,
+      DEFAULT_MINIMUM_TRADE_LISTINGS,
+      ids.length,
     );
+    const minimumIndependentSellers = Math.max(
+      0,
+      Math.round(
+        options.minimumIndependentSellers ??
+          DEFAULT_MINIMUM_INDEPENDENT_SELLERS,
+      ),
+    );
+    const fetchedItems: Poe2Item[] = [];
+    let comparablePrices: ComparablePrice[] = [];
 
-    return fetchedItems.map((item, index) => ({
-      ...prices[index],
-      itemId: item.id,
-      listedAmount: item.listing.price.amount,
-      listedCurrency: item.listing.price.currency,
-      item,
-    }));
+    for (
+      let offset = 0;
+      offset < ids.length && offset < maximumListings;
+      offset += 10
+    ) {
+      const batch = await Poe2Trade.fetchItems(
+        ids.slice(offset, Math.min(offset + 10, maximumListings)),
+        options,
+      );
+      fetchedItems.push(...(batch.result || []));
+
+      const currencies = Poe2Trade.toUniqueItems(
+        fetchedItems.map((item) => item.listing.price.currency),
+      );
+      await this.fetchManyExchangeRates(currency, currencies, league, options);
+      const normalizedPrices = this.toEquivalentPrices(
+        currency,
+        fetchedItems.map((item) => ({
+          amount: item.listing.price.amount,
+          currency: item.listing.price.currency,
+        })),
+        league,
+      );
+      comparablePrices = fetchedItems.map((item, index) => ({
+        ...normalizedPrices[index],
+        itemId: item.id,
+        listedAmount: item.listing.price.amount,
+        listedCurrency: item.listing.price.currency,
+        item,
+      }));
+
+      if (
+        Math.min(offset + 10, ids.length, maximumListings) >= minimumListings &&
+        (minimumIndependentSellers === 0 ||
+          analyzeComparablePrices(comparablePrices).included.length >=
+            minimumIndependentSellers)
+      ) {
+        break;
+      }
+    }
+
+    return comparablePrices;
   }
 
   sampleRange(items: string[], want: number) {
@@ -1214,10 +2171,18 @@ class PriceEstimator {
     return price;
   }
 
-  getCachedEstimates() {
+  getCachedEstimates(league?: string) {
     const cacheKey = `price_estimates`;
     const data = Cache.getJson<Record<string, Estimate>>(cacheKey) || {};
-    return data;
+    if (league === undefined) {
+      return data;
+    }
+
+    return Object.fromEntries(
+      Object.entries(data).filter(
+        ([, estimate]) => estimate.search?.league === league,
+      ),
+    );
   }
 
   cachePriceEstimate(itemId: string, estimate: Estimate) {
@@ -1227,7 +2192,18 @@ class PriceEstimator {
     Cache.setJson(cacheKey, data, Cache.times.day);
   }
 
-  priceEstimate(prices: Price[]) {
+  removeCachedEstimate(itemId: string) {
+    const cacheKey = `price_estimates`;
+    const data = Cache.getJson<Record<string, Estimate>>(cacheKey) || {};
+    if (!(itemId in data)) {
+      return;
+    }
+
+    delete data[itemId];
+    Cache.setJson(cacheKey, data, Cache.times.day);
+  }
+
+  priceEstimate(prices: Price[], options: PriceAnalysisOptions = {}) {
     if (!prices.length) {
       throw new Error("No comparable listings found in the selected league.");
     }
@@ -1244,6 +2220,15 @@ class PriceEstimator {
     const analysis = analyzeComparablePrices(prices);
     if (!analysis.included.length) {
       throw new Error("No reliable comparable listings were found.");
+    }
+    const minimumIndependentSellers = Math.max(
+      1,
+      Math.round(options.minimumIndependentSellers || 1),
+    );
+    if (analysis.included.length < minimumIndependentSellers) {
+      throw new Error(
+        `Only ${analysis.included.length} reliable independent seller${analysis.included.length === 1 ? " was" : "s were"} found; at least ${minimumIndependentSellers} independent sellers are required.`,
+      );
     }
 
     return {
@@ -1368,7 +2353,15 @@ class PriceEstimator {
     options: ApiRequestRunOptions = {},
   ) {
     for (const currency of Poe2Trade.toUniqueItems(iHave)) {
-      await this.exchangeRate(iWant, currency, league, false, options);
+      try {
+        await this.exchangeRate(iWant, currency, league, false, options);
+      } catch (error) {
+        rethrowIfRequestCancelled(error, options);
+        console.warn(
+          `Unable to convert ${currency} to ${iWant}; excluding those listings`,
+          error,
+        );
+      }
     }
   }
 
@@ -1526,10 +2519,10 @@ class PriceEstimator {
     return Math.sqrt(this.variance(values));
   }
 
-  extractMod(mod: string) {
-    // This regex captures a number (integer or decimal) at the beginning of the string
-    const numberCapture = /^.*?([-+]?\d+(?:\.\d+)?)(.*)$/;
-
+  extractMod(
+    mod: string,
+    preferredSection?: "explicit" | "implicit" | "enchant",
+  ) {
     // First, replace bracketed alternatives:
     // This handles patterns with a pipe, e.g. "[Foo|Bar]"
     const bracketCapture = /\[([^|\]]+)\|([^\]]+)\]/g;
@@ -1545,19 +2538,24 @@ class PriceEstimator {
     // Finally, replace all numbers globally with "#"
     const output = withoutBrackets.replace(/[-+]?\d+(?:\.\d+)?/g, "#"); // Replace the number with a '#' and capture the rest of the string in group 2.
 
-    // To capture the numbers that were replaced:
-    const match = mod.match(numberCapture);
+    const values = withoutBrackets
+      .match(/[-+]?\d+(?:\.\d+)?/g)
+      ?.map(Number);
 
     // Look for generalized match, or exact match
-    const statEntry = this.getStatEntryForMod(output, withoutBrackets);
+    const statEntry = this.getStatEntryForMod(
+      output,
+      withoutBrackets,
+      preferredSection,
+    );
 
     if (!statEntry) {
       console.log(`No stat entry found for mod: ${mod}, ${output}`);
       throw new Error(`No stat entry found for mod: ${mod}, ${output}`);
     }
 
-    let value1 = match ? Number(match[1]) : undefined;
-    let value2 = match && match[2] ? Number(match[2]) : undefined;
+    let value1 = values?.[0];
+    let value2 = values?.[1];
 
     const inverted =
       (statEntry.text.includes("increased") && output.includes("reduced")) ||
@@ -1565,8 +2563,8 @@ class PriceEstimator {
 
     if (statEntry.text !== output && inverted) {
       // we had to invert to find the stat entry
-      if (value1) value1 = -value1;
-      if (value2) value2 = -value2;
+      if (value1 !== undefined) value1 = -value1;
+      if (value2 !== undefined) value2 = -value2;
     }
 
     return {
@@ -1578,7 +2576,11 @@ class PriceEstimator {
     };
   }
 
-  getStatEntryForMod(mod: string, original?: string) {
+  getStatEntryForMod(
+    mod: string,
+    original?: string,
+    preferredSection?: "explicit" | "implicit" | "enchant",
+  ) {
     const stats = Stats.map((statGroup) =>
       statGroup.entries.filter(
         (entry) =>
@@ -1590,10 +2592,18 @@ class PriceEstimator {
           (original && entry.text === original),
       ),
     ).flat();
-    return stats.length > 0 ? stats[0] : null;
+    const preferredEntry = preferredSection
+      ? stats.find((entry) =>
+          preferredSection === "enchant"
+            ? /^(?:enchant|rune)\./.test(entry.id)
+            : entry.id.startsWith(`${preferredSection}.`),
+        )
+      : undefined;
+    return preferredEntry || stats[0] || null;
   }
 
   parseItemMods(item: Poe2Item) {
+    const unresolved: UnresolvedItemModifier[] = [];
     const parseMods = (
       mods: ItemMod[] | undefined,
       section: "explicit" | "implicit" | "enchant",
@@ -1607,11 +2617,11 @@ class PriceEstimator {
           mod,
         );
         try {
-          const parsed = this.extractMod(description);
+          const parsed = this.extractMod(description, section);
           return [
             authoritativeHash
-              ? { ...parsed, hash: authoritativeHash }
-              : parsed,
+              ? { ...parsed, hash: authoritativeHash, sourceIndex: index }
+              : { ...parsed, sourceIndex: index },
           ];
         } catch {
           if (authoritativeHash) {
@@ -1626,10 +2636,16 @@ class PriceEstimator {
                 value1: values?.[0],
                 value2: values?.[1],
                 hash: authoritativeHash,
+                sourceIndex: index,
               },
             ];
           }
 
+          unresolved.push({
+            section,
+            sourceIndex: index,
+            text: description,
+          });
           console.warn(
             "Skipping modifier that is not in the local stat table",
             mod,
@@ -1648,6 +2664,7 @@ class PriceEstimator {
       explicits,
       implicits,
       enchants,
+      unresolved,
     };
   }
 

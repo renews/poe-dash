@@ -60,7 +60,14 @@ export interface Poe2TradeSearch {
   complexity: number;
   result: string[];
   total: number;
-  strategy?: "strict" | "one-mod-relaxed";
+  strategy?:
+    | "market-properties"
+    | "market-pseudos"
+    | "strict"
+    | "one-mod-relaxed"
+    | "modifier-count-relaxed";
+  marketProperty?: "dps" | "pdps" | "edps" | "ar" | "ev" | "es";
+  marketPropertyMinimum?: number;
   selectedModifierCount?: number;
   minimumModifierCount?: number;
 }
@@ -193,8 +200,19 @@ export type ItemMod =
   | {
       description: string;
       hash: string;
-      mods: unknown[];
+      mods: ItemModDetail[];
     };
+
+export interface ItemModDetail {
+  name?: string;
+  tier?: string;
+  level?: number;
+  magnitudes?: Array<{
+    hash?: string;
+    min?: string;
+    max?: string;
+  }>;
+}
 
 export type ModifierSection = "implicit" | "explicit" | "enchant";
 export type ModifierDisplayKind = ModifierSection | "prefix" | "suffix";
@@ -216,17 +234,104 @@ export function getModifierDisplayKind(
     return section;
   }
 
-  const tier =
-    item.item?.extended?.mods?.explicit?.[index]?.tier?.toLowerCase();
-  if (tier?.startsWith("p") || tier?.includes("prefix")) {
+  const tierTokens = getItemModifierTierLabels(item, section, index).map(
+    ({ token }) => token.toLowerCase(),
+  );
+  if (
+    tierTokens.length > 0 &&
+    tierTokens.every(
+      (tier) => tier.startsWith("p") || tier.includes("prefix"),
+    )
+  ) {
     return "prefix";
   }
 
-  if (tier?.startsWith("s") || tier?.includes("suffix")) {
+  if (
+    tierTokens.length > 0 &&
+    tierTokens.every(
+      (tier) => tier.startsWith("s") || tier.includes("suffix"),
+    )
+  ) {
     return "suffix";
   }
 
   return section;
+}
+
+export interface ModifierTierLabel {
+  token: string;
+  label: string;
+}
+
+function getModifierTierLabel(token: string) {
+  const prefix = token.match(/^p(\d+)$/i);
+  if (prefix) {
+    return `Prefix tier ${prefix[1]}`;
+  }
+
+  const suffix = token.match(/^s(\d+)$/i);
+  if (suffix) {
+    return `Suffix tier ${suffix[1]}`;
+  }
+
+  return `Modifier tier ${token}`;
+}
+
+function getItemSectionModifier(
+  item: Poe2Item,
+  section: ModifierSection,
+  index: number,
+) {
+  const modifiers =
+    section === "implicit"
+      ? item.item?.implicitMods
+      : section === "enchant"
+        ? item.item?.enchantMods
+        : item.item?.explicitMods;
+
+  return modifiers?.[index];
+}
+
+function toModifierTierLabels(tokens: string[]): ModifierTierLabel[] {
+  return tokens
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => ({ token, label: getModifierTierLabel(token) }));
+}
+
+export function getItemModifierTierLabels(
+  item: Poe2Item,
+  section: ModifierSection,
+  index: number,
+  displayMod = getItemSectionModifier(item, section, index),
+): ModifierTierLabel[] {
+  if (displayMod && typeof displayMod !== "string") {
+    const structuredTiers = displayMod.mods
+      .map((mod) => mod.tier)
+      .filter((tier): tier is string => typeof tier === "string");
+    if (structuredTiers.length > 0) {
+      return toModifierTierLabels(structuredTiers);
+    }
+  }
+
+  const displayHash = getItemModifierHash(item, section, index, displayMod);
+  if (!displayHash) {
+    return [];
+  }
+
+  const extendedMods = item.item?.extended?.mods?.[section] || [];
+  const matchingTiers = extendedMods
+    .filter((mod) =>
+      mod.magnitudes?.some(
+        (magnitude) =>
+          typeof magnitude.hash === "string" &&
+          normalizeModifierHash(magnitude.hash) === displayHash,
+      ),
+    )
+    .map((mod) => mod.tier)
+    .filter((tier): tier is string => typeof tier === "string");
+
+  return toModifierTierLabels(matchingTiers);
 }
 
 export function getItemModifierHash(
@@ -245,6 +350,7 @@ export function getItemModifierHash(
 export type ModifierSelection = {
   implicit: boolean[];
   explicit: boolean[];
+  enchant?: boolean[];
   itemLevel?: boolean;
   requiredLevel?: boolean;
   requiredLevelMin?: number;
@@ -253,6 +359,7 @@ export type ModifierSelection = {
 
 export interface Poe2Item {
   id: string;
+  origin?: "clipboard";
   listing: {
     method: string;
     indexed: string; // ISO date string

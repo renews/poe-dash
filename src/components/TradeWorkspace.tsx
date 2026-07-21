@@ -3,13 +3,14 @@ import {
   BarChart3,
   CheckCircle2,
   Clock3,
+  ExternalLink,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   SearchX,
 } from "lucide-react";
-import { Estimate } from "../services/PriceEstimator";
+import { Estimate, getItemGemLevel } from "../services/PriceEstimator";
 import {
   formatItemMod,
   formatPriceAmount,
@@ -36,6 +37,7 @@ interface TradeWorkspaceProps {
   stashTabs: string[];
   selectedStash: string;
   priceEstimates: Record<string, Estimate>;
+  priceCheckErrors: Record<string, string>;
   modifierSelections: Record<string, ModifierSelection>;
   league: string;
   openMarketInspectorOnSelect: boolean;
@@ -90,14 +92,86 @@ function getComparableRange(estimate?: Estimate) {
   };
 }
 
-const MarketInspector: React.FC<{
+function getEstimateSourceLabel(source?: string) {
+  switch (source) {
+    case "currency-exchange":
+      return "Official currency exchange";
+    case "official-trade":
+      return "Official trade";
+    case "poe2scout":
+      return "Poe2Scout";
+    default:
+      return "Unavailable";
+  }
+}
+
+function getEstimateMethodLabel(method?: string) {
+  switch (method) {
+    case "exchange-median":
+      return "Exchange offer median";
+    case "median":
+      return "Listing median";
+    case "market-history":
+      return "Market history";
+    case "market-current":
+      return "Current market snapshot";
+    default:
+      return "Unavailable";
+  }
+}
+
+function getSearchStrategyLabel(strategy?: string) {
+  switch (strategy) {
+    case "market-properties":
+      return "Awakened-style market properties";
+    case "market-pseudos":
+      return "Awakened-style aggregate modifiers";
+    case "strict":
+      return "Exact selected filters";
+    case "one-mod-relaxed":
+      return "One modifier relaxed";
+    case "modifier-count-relaxed":
+      return "Progressive modifier fallback";
+    case "exchange-exact":
+      return "Exact exchange identity";
+    default:
+      return "Unavailable";
+  }
+}
+
+export const MarketInspector: React.FC<{
   item?: Poe2Item;
   estimate?: Estimate;
   hidden: boolean;
   isPriceChecking: boolean;
   onPriceCheck: (item: Poe2Item) => void | Promise<void>;
   league: string;
-}> = ({ item, estimate, hidden, isPriceChecking, onPriceCheck, league }) => {
+  showListedPrice?: boolean;
+  showAction?: boolean;
+  showTradeAction?: boolean;
+  isOpeningTrade?: boolean;
+  skippedModifiers?: string[];
+  onOpenOfficialTrade?: () => void | Promise<void>;
+  kicker?: string;
+  title?: string;
+  emptyMessage?: string;
+}> = ({
+  item,
+  estimate,
+  hidden,
+  isPriceChecking,
+  onPriceCheck,
+  league,
+  showListedPrice = true,
+  showAction = true,
+  showTradeAction = false,
+  isOpeningTrade = false,
+  skippedModifiers = [],
+  onOpenOfficialTrade,
+  kicker = "Selected item",
+  title = "Market inspector",
+  emptyMessage = "Select an item to inspect its market signal.",
+}) => {
   const range = useMemo(() => getComparableRange(estimate), [estimate]);
   const rangePrices =
     range?.status === "ready"
@@ -112,6 +186,18 @@ const MarketInspector: React.FC<{
     estimate?.search.league || league,
   );
   const comparables = estimate?.comparables || [];
+  const reliableSellerCount =
+    estimate?.source === "currency-exchange"
+      ? estimate.sourceComparableCount || 0
+      : estimate?.source === "official-trade"
+        ? comparables.length
+        : 0;
+  const marketObservationCount =
+    estimate?.source === "poe2scout" &&
+    Number.isFinite(estimate.market?.quantity) &&
+    (estimate.market?.quantity || 0) > 0
+      ? estimate.market!.quantity
+      : 0;
   const usedExplicitHashes = estimate?.search.explicitHashes
     ? new Set(estimate.search.explicitHashes)
     : undefined;
@@ -121,6 +207,7 @@ const MarketInspector: React.FC<{
   const modifiers = item
     ? [...(item.item.implicitMods || []), ...(item.item.explicitMods || [])]
     : [];
+  const gemLevel = item ? getItemGemLevel(item) : undefined;
 
   return (
     <aside
@@ -132,15 +219,15 @@ const MarketInspector: React.FC<{
     >
       <header className="trade-panel__header">
         <div>
-          <p className="trade-kicker">Selected item</p>
-          <h2 id="market-inspector-title">Market inspector</h2>
+          <p className="trade-kicker">{kicker}</p>
+          <h2 id="market-inspector-title">{title}</h2>
         </div>
         <BarChart3 aria-hidden="true" />
       </header>
       {!item ? (
         <div className="market-inspector__empty">
           <SearchX aria-hidden="true" />
-          <p>Select an item to inspect its market signal.</p>
+          <p>{emptyMessage}</p>
         </div>
       ) : (
         <div className="market-inspector__content">
@@ -155,18 +242,23 @@ const MarketInspector: React.FC<{
             <div>
               <span className="rarity-label">{item.item.rarity || "Item"}</span>
               <h3>{getItemName(item)}</h3>
-              <p>{item.item.typeLine || item.item.baseType}</p>
+              <p>
+                {item.item.typeLine || item.item.baseType}
+                {gemLevel !== undefined ? ` · Gem level ${gemLevel}` : ""}
+              </p>
             </div>
           </div>
 
           <dl className="market-summary">
-            <div>
-              <dt>Listed price</dt>
-              <dd>
-                {formatPriceAmount(item.listing.price.amount)}{" "}
-                {item.listing.price.currency}
-              </dd>
-            </div>
+            {showListedPrice && (
+              <div>
+                <dt>Listed price</dt>
+                <dd>
+                  {formatPriceAmount(item.listing.price.amount)}{" "}
+                  {item.listing.price.currency}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>Recommended price</dt>
               <dd>{formatSuggestedPriceLabel(estimate?.price)}</dd>
@@ -176,10 +268,59 @@ const MarketInspector: React.FC<{
               <dd>{estimate?.confidence || "Not checked"}</dd>
             </div>
             <div>
-              <dt>Comparable listings</dt>
-              <dd>{estimate?.comparables?.length || 0}</dd>
+              <dt>
+                {estimate?.source === "currency-exchange"
+                  ? "Exchange sellers"
+                  : "Comparable listings"}
+              </dt>
+              <dd>
+                {estimate?.source === "currency-exchange"
+                  ? estimate.sourceComparableCount || 0
+                  : estimate?.comparables?.length || 0}
+              </dd>
             </div>
           </dl>
+
+          {estimate && (
+            <section
+              className="market-evidence"
+              aria-label="Price estimate evidence"
+            >
+              <h4>Evidence trail</h4>
+              <dl>
+                <div>
+                  <dt>Source</dt>
+                  <dd>{getEstimateSourceLabel(estimate.source)}</dd>
+                </div>
+                <div>
+                  <dt>Method</dt>
+                  <dd>{getEstimateMethodLabel(estimate.method)}</dd>
+                </div>
+                <div>
+                  <dt>Search</dt>
+                  <dd>{getSearchStrategyLabel(estimate.search.strategy)}</dd>
+                </div>
+                {reliableSellerCount > 0 && (
+                  <div>
+                    <dt>Reliable sample</dt>
+                    <dd>
+                      {reliableSellerCount} independent seller
+                      {reliableSellerCount === 1 ? "" : "s"}
+                    </dd>
+                  </div>
+                )}
+                {marketObservationCount > 0 && (
+                  <div>
+                    <dt>Scout sample</dt>
+                    <dd>
+                      {marketObservationCount} market observation
+                      {marketObservationCount === 1 ? "" : "s"}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            </section>
+          )}
 
           <section
             className="market-range"
@@ -214,6 +355,12 @@ const MarketInspector: React.FC<{
               </dl>
             ) : range?.status === "mixed" ? (
               <p>Mixed comparable currencies cannot be combined.</p>
+            ) : estimate?.source === "currency-exchange" ? (
+              <p>The recommendation uses the exchange seller median.</p>
+            ) : estimate?.source === "poe2scout" ? (
+              <p>Poe2Scout does not provide individual comparable listings.</p>
+            ) : estimate ? (
+              <p>No individual comparable listings were returned.</p>
             ) : (
               <p>Check this item to load comparable listings.</p>
             )}
@@ -289,16 +436,49 @@ const MarketInspector: React.FC<{
             </section>
           )}
 
-          <button
-            type="button"
-            className="app-button app-button--primary market-inspector__action"
-            aria-label={`Price check ${getItemName(item)}`}
-            disabled={isPriceChecking}
-            onClick={() => void onPriceCheck(item)}
-          >
-            <CheckCircle2 aria-hidden="true" />
-            {isPriceChecking ? "Checking price" : "Check price"}
-          </button>
+          {skippedModifiers.length > 0 && (
+            <section
+              className="market-skipped"
+              aria-label="Skipped or unsupported modifiers"
+            >
+              <h4>Skipped or unsupported modifiers</h4>
+              <p>These copied modifiers were not included in the search.</p>
+              <ul>
+                {skippedModifiers.map((modifier, index) => (
+                  <li key={`${modifier}-${index}`}>{modifier}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {showTradeAction && onOpenOfficialTrade && (
+            <button
+              type="button"
+              className="app-button app-button--secondary market-inspector__action"
+              disabled={isOpeningTrade}
+              onClick={() => void onOpenOfficialTrade()}
+            >
+              <ExternalLink aria-hidden="true" />
+              {isOpeningTrade
+                ? "Opening official trade"
+                : estimate?.source === "currency-exchange"
+                  ? "Open official exchange"
+                  : "Open official trade"}
+            </button>
+          )}
+
+          {showAction && (
+            <button
+              type="button"
+              className="app-button app-button--primary market-inspector__action"
+              aria-label={`Price check ${getItemName(item)}`}
+              disabled={isPriceChecking}
+              onClick={() => void onPriceCheck(item)}
+            >
+              <CheckCircle2 aria-hidden="true" />
+              {isPriceChecking ? "Checking price" : "Check price"}
+            </button>
+          )}
         </div>
       )}
     </aside>
@@ -391,11 +571,26 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = (props) => {
               <dt>Price checked</dt>
               <dd>
                 {
-                  props.items.filter((item) => props.priceEstimates[item.id])
-                    .length
+                  props.items.filter(
+                    (item) =>
+                      props.priceEstimates[item.id] &&
+                      !props.priceCheckErrors[item.id],
+                  ).length
                 }
               </dd>
             </div>
+            {props.items.some((item) => props.priceCheckErrors[item.id]) && (
+              <div>
+                <dt>Unavailable</dt>
+                <dd>
+                  {
+                    props.items.filter(
+                      (item) => props.priceCheckErrors[item.id],
+                    ).length
+                  }
+                </dd>
+              </div>
+            )}
           </dl>
         </div>
       </nav>
@@ -441,17 +636,25 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = (props) => {
             </button>
           </div>
         </header>
-        <CompactItemList
-          items={props.items}
-          priceEstimates={props.priceEstimates}
-          modifierSelections={props.modifierSelections}
-          selectedItemId={selectedItem?.id}
-          onSelectItem={selectItem}
-          onPriceCheck={props.onPriceCheck}
-          onModifierSelectionChange={props.onModifierSelectionChange}
-          onStashPriceCheck={props.onStashPriceCheck}
-          isPriceChecking={props.isPriceChecking}
-        />
+        {props.items.length > 0 ? (
+          <CompactItemList
+            items={props.items}
+            priceEstimates={props.priceEstimates}
+            priceCheckErrors={props.priceCheckErrors}
+            modifierSelections={props.modifierSelections}
+            selectedItemId={selectedItem?.id}
+            onSelectItem={selectItem}
+            onPriceCheck={props.onPriceCheck}
+            onModifierSelectionChange={props.onModifierSelectionChange}
+            onStashPriceCheck={props.onStashPriceCheck}
+            isPriceChecking={props.isPriceChecking}
+          />
+        ) : (
+          <div className="listing-ledger__empty" role="status">
+            <SearchX aria-hidden="true" />
+            <p>No sales match the current filters.</p>
+          </div>
+        )}
       </section>
 
       <MarketInspector

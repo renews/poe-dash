@@ -19,6 +19,8 @@ export function completeModifierSelection(
       selection?.implicit ?? (item.item.implicitMods || []).map(() => true),
     explicit:
       selection?.explicit ?? (item.item.explicitMods || []).map(() => true),
+    enchant:
+      selection?.enchant ?? (item.item.enchantMods || []).map(() => true),
     itemLevel: selection?.itemLevel === true,
     requiredLevel: selection?.requiredLevel === true,
     ...(defaultRequiredLevelRange

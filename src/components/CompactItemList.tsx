@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
-import { Estimate } from "../services/PriceEstimator";
+import { Estimate, getItemGemLevel } from "../services/PriceEstimator";
 import { toggleExpandedItemIds } from "../services/compactItemState";
 import {
   getListingAge,
@@ -75,6 +75,7 @@ function formatListedPrice(item: Poe2Item) {
 export function CompactItemList(props: {
   items: Poe2Item[];
   priceEstimates: Record<string, Estimate>;
+  priceCheckErrors?: Record<string, string>;
   modifierSelections: Record<string, ModifierSelection>;
   selectedItemId?: string;
   onSelectItem?: (itemId: string) => void;
@@ -93,9 +94,6 @@ export function CompactItemList(props: {
   const [checkingItemIds, setCheckingItemIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const [priceCheckErrors, setPriceCheckErrors] = useState<
-    Record<string, string>
-  >({});
   const [checkingStashName, setCheckingStashName] = useState<string | null>(
     null,
   );
@@ -108,23 +106,14 @@ export function CompactItemList(props: {
 
   const checkPrice = async (item: Poe2Item) => {
     setCheckingItemIds((current) => new Set(current).add(item.id));
-    setPriceCheckErrors((current) => {
-      const next = { ...current };
-      delete next[item.id];
-      return next;
-    });
 
     try {
       await props.onPriceCheck(
         item,
         completeModifierSelection(item, props.modifierSelections[item.id]),
       );
-    } catch (error) {
-      setPriceCheckErrors((current) => ({
-        ...current,
-        [item.id]:
-          error instanceof Error ? error.message : "Price check failed.",
-      }));
+    } catch {
+      // The application context owns persisted item-level failure state.
     } finally {
       setCheckingItemIds((current) => {
         const next = new Set(current);
@@ -183,9 +172,10 @@ export function CompactItemList(props: {
                     const itemName = getItemName(item);
                     const estimate = props.priceEstimates[item.id];
                     const isChecking = checkingItemIds.has(item.id);
-                    const priceCheckError = priceCheckErrors[item.id];
+                    const priceCheckError = props.priceCheckErrors?.[item.id];
                     const optionsExpanded = expandedItemIds.has(item.id);
                     const optionsId = `compact-price-check-options-${item.id}`;
+                    const gemLevel = getItemGemLevel(item);
                     const listingAge =
                       getListingAge(item.listing?.indexed) || "Unknown";
                     const listingAgeStatus = getListingAgeStatus(
@@ -229,6 +219,9 @@ export function CompactItemList(props: {
                               />
                               <span>
                                 {item.item.typeLine || item.item.baseType}
+                                {gemLevel !== undefined
+                                  ? ` · Gem level ${gemLevel}`
+                                  : ""}
                               </span>
                             </div>
                           </div>
@@ -240,7 +233,9 @@ export function CompactItemList(props: {
                           </span>
                           <span
                             data-price-status={
-                              estimate?.matchesCurrentPrice
+                              priceCheckError
+                                ? "failed"
+                                : estimate?.matchesCurrentPrice
                                 ? "matches"
                                 : estimate
                                   ? "review"
@@ -248,13 +243,17 @@ export function CompactItemList(props: {
                             }
                             className="whitespace-nowrap suggested-price"
                           >
-                            {formatSuggestedPriceLabel(
-                              estimate?.price,
-                              estimate?.matchesCurrentPrice,
-                            )}
+                            {priceCheckError
+                              ? "Unavailable"
+                              : formatSuggestedPriceLabel(
+                                  estimate?.price,
+                                  estimate?.matchesCurrentPrice,
+                                )}
                           </span>
                           <span className="price-position-label">
-                            {estimate?.matchesCurrentPrice
+                            {priceCheckError
+                              ? "Failed"
+                              : estimate?.matchesCurrentPrice
                               ? "Fair"
                               : estimate
                                 ? "Review"

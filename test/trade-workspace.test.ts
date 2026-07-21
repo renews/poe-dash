@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { TradeWorkspace } from "../src/components/TradeWorkspace";
+import {
+  MarketInspector,
+  TradeWorkspace,
+} from "../src/components/TradeWorkspace";
 import { Estimate } from "../src/services/PriceEstimator";
 import { resolveSelectedItem } from "../src/services/itemSelection";
 import {
@@ -52,6 +55,127 @@ test("falls back to the first visible item when selection leaves the filter", ()
   expect(resolveSelectedItem([], "missing")).toBeUndefined();
 });
 
+test("explains when no sales match the active filters", () => {
+  const markup = renderToStaticMarkup(
+    createElement(TradeWorkspace, {
+      items: [],
+      allItems: [createItem("hidden", "Hidden Item")],
+      stashTabs: ["All"],
+      selectedStash: "All",
+      priceEstimates: {},
+      priceCheckErrors: {},
+      modifierSelections: {},
+      league: "Standard",
+      openMarketInspectorOnSelect: true,
+      isPriceChecking: false,
+      onStashSelect: () => {},
+      onPriceCheck: async () => {},
+      onModifierSelectionChange: () => {},
+      onStashPriceCheck: async () => {},
+    }),
+  );
+
+  expect(markup).toContain('role="status"');
+  expect(markup).toContain("No sales match the current filters.");
+  expect(markup).toContain('<span class="ledger-count" aria-live="polite">0 items</span>');
+});
+
+test("shows the exact level of a copied gem in the market inspector", () => {
+  const gem = createItem("copied-gem", "Spark", "Gem");
+  gem.item.frameType = 4;
+  gem.item.gemLevel = 15;
+
+  const markup = renderToStaticMarkup(
+    createElement(MarketInspector, {
+      item: gem,
+      hidden: false,
+      isPriceChecking: false,
+      onPriceCheck: async () => {},
+      league: "Standard",
+    }),
+  );
+
+  expect(markup).toContain("Gem level 15");
+});
+
+test("labels progressively relaxed official trade evidence", () => {
+  const item = createItem("relaxed", "Soul Thirst");
+  const markup = renderToStaticMarkup(
+    createElement(MarketInspector, {
+      item,
+      estimate: {
+        ...estimate,
+        source: "official-trade",
+        method: "median",
+        search: {
+          explicitCount: 4,
+          strategy: "modifier-count-relaxed",
+          selectedModifierCount: 4,
+          minimumModifierCount: 2,
+        },
+      } as Estimate,
+      hidden: false,
+      isPriceChecking: false,
+      onPriceCheck: async () => {},
+      league: "HC Runes of Aldur",
+    }),
+  );
+
+  expect(markup).toContain("Progressive modifier fallback");
+});
+
+test("labels Awakened-style weapon property evidence", () => {
+  const item = createItem("weapon", "Soul Thirst");
+  const markup = renderToStaticMarkup(
+    createElement(MarketInspector, {
+      item,
+      estimate: {
+        ...estimate,
+        source: "official-trade",
+        method: "median",
+        search: {
+          explicitCount: 0,
+          strategy: "market-properties",
+          selectedModifierCount: 1,
+          minimumModifierCount: 1,
+        },
+      } as Estimate,
+      hidden: false,
+      isPriceChecking: false,
+      onPriceCheck: async () => {},
+      league: "HC Runes of Aldur",
+    }),
+  );
+
+  expect(markup).toContain("Awakened-style market properties");
+});
+
+test("labels Awakened-style aggregate modifier evidence", () => {
+  const item = createItem("aggregate", "Doom Loop");
+  const markup = renderToStaticMarkup(
+    createElement(MarketInspector, {
+      item,
+      estimate: {
+        ...estimate,
+        source: "official-trade",
+        method: "median",
+        search: {
+          explicitCount: 2,
+          strategy: "market-pseudos",
+          selectedModifierCount: 2,
+          minimumModifierCount: 2,
+        },
+      } as Estimate,
+      hidden: false,
+      isPriceChecking: false,
+      onPriceCheck: async () => {},
+      league: "HC Runes of Aldur",
+    }),
+  );
+
+  expect(markup).toContain("Awakened-style aggregate modifiers");
+});
+
 test("renders toggleable sales sidebars with the inspector collapsed by default", () => {
   const item = createItem("first", "Doom Loop");
   const markup = renderToStaticMarkup(
@@ -61,6 +185,7 @@ test("renders toggleable sales sidebars with the inspector collapsed by default"
       stashTabs: ["All", "~b/o 1 divine"],
       selectedStash: "All",
       priceEstimates: { first: estimate },
+      priceCheckErrors: {},
       modifierSelections: {},
       league: "Standard",
       openMarketInspectorOnSelect: true,
@@ -113,6 +238,31 @@ test("renders toggleable sales sidebars with the inspector collapsed by default"
   expect(marketToggle).toContain('aria-expanded="false"');
 });
 
+test("does not count a failed retry's stale estimate as price checked", () => {
+  const item = createItem("failed", "Doom Loop");
+  const markup = renderToStaticMarkup(
+    createElement(TradeWorkspace, {
+      items: [item],
+      allItems: [item],
+      stashTabs: ["All"],
+      selectedStash: "All",
+      priceEstimates: { failed: estimate },
+      priceCheckErrors: { failed: "No comparable listings found." },
+      modifierSelections: {},
+      league: "Standard",
+      openMarketInspectorOnSelect: true,
+      isPriceChecking: false,
+      onStashSelect: () => {},
+      onPriceCheck: async () => {},
+      onModifierSelectionChange: () => {},
+      onStashPriceCheck: async () => {},
+    }),
+  );
+
+  expect(markup).toContain("<dt>Price checked</dt><dd>0</dd>");
+  expect(markup).toContain("<dt>Unavailable</dt><dd>1</dd>");
+});
+
 test("toggles either sales sidebar without changing the other", () => {
   const initial = createDefaultTradeSidebarVisibility();
   const marketOpen = toggleTradeSidebar(initial, "market");
@@ -147,6 +297,7 @@ test("does not render a stray zero when the selected item has no modifiers", () 
       stashTabs: ["All"],
       selectedStash: "All",
       priceEstimates: {},
+      priceCheckErrors: {},
       modifierSelections: {},
       league: "Standard",
       openMarketInspectorOnSelect: true,
@@ -194,6 +345,7 @@ test("uses the statistical median for an even number of comparables", () => {
       stashTabs: ["All"],
       selectedStash: "All",
       priceEstimates: { even: evenEstimate },
+      priceCheckErrors: {},
       modifierSelections: {},
       league: "Standard",
       openMarketInspectorOnSelect: true,
@@ -244,6 +396,7 @@ test("does not combine comparable amounts from different currencies", () => {
       stashTabs: ["All"],
       selectedStash: "All",
       priceEstimates: { mixed: mixedEstimate },
+      priceCheckErrors: {},
       modifierSelections: {},
       league: "Standard",
       openMarketInspectorOnSelect: true,

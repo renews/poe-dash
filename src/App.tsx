@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   HashRouter as Router,
   Navigate,
   Route,
   Routes,
+  useNavigate,
 } from "react-router-dom";
 import MainPage from "./components/MainPage";
 import MessagesPage from "./components/MessagesPage";
@@ -13,6 +14,10 @@ import SaleHistoryPage from "./components/SaleHistoryPage";
 import { PrimaryNavigation } from "./components/PrimaryNavigation";
 import { WindowControls } from "./components/WindowControls";
 import LiveMonitor from "./components/LiveMonitor";
+import {
+  PriceCheckPage,
+  type CapturedPriceCheckItem,
+} from "./components/PriceCheckPage";
 import { type LiveMonitorStatus } from "./components/LiveMonitorButton";
 import { AppContextProvider, useAppContext } from "./contexts/AppContext";
 import {
@@ -24,6 +29,10 @@ import {
 import "./App.css";
 
 const AppContent: React.FC = () => {
+  const navigate = useNavigate();
+  const captureSequence = useRef(0);
+  const [capturedPriceCheckItem, setCapturedPriceCheckItem] =
+    useState<CapturedPriceCheckItem>();
   const {
     accountName,
     selectedLeague,
@@ -45,6 +54,28 @@ const AppContent: React.FC = () => {
         : isLiveMonitoring
           ? "watching"
           : "paused";
+
+  useEffect(() => {
+    const priceCheckApi = window.desktopApi?.priceCheck;
+    if (!priceCheckApi) {
+      return;
+    }
+
+    return priceCheckApi.onItemCopied((text) => {
+      captureSequence.current += 1;
+      setCapturedPriceCheckItem({
+        sequence: captureSequence.current,
+        text,
+      });
+      navigate("/price-check");
+    });
+  }, [navigate]);
+
+  const handleCapturedPriceCheckItem = useCallback((sequence: number) => {
+    setCapturedPriceCheckItem((current) =>
+      current?.sequence === sequence ? undefined : current,
+    );
+  }, []);
 
   return (
     <div className="app-shell">
@@ -98,6 +129,15 @@ const AppContent: React.FC = () => {
               }
             />
             <Route path="/messages" element={<MessagesPage />} />
+            <Route
+              path="/price-check"
+              element={
+                <PriceCheckPage
+                  capturedItem={capturedPriceCheckItem}
+                  onCapturedItemHandled={handleCapturedPriceCheckItem}
+                />
+              }
+            />
             <Route path="/currency-rates" element={<CurrencyRatesPage />} />
             <Route path="/configuration" element={<ConfigurationPage />} />
             <Route

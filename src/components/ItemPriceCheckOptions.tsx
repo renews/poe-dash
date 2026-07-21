@@ -1,5 +1,6 @@
 import {
   formatItemMod,
+  getItemModifierTierLabels,
   getModifierDisplayKind,
   ModifierSelection,
   Poe2Item,
@@ -11,8 +12,9 @@ import {
 } from "../services/PriceEstimator";
 import { completeModifierSelection } from "../services/modifierSelection";
 import { formFieldClassName, modifierColorClass } from "./formStyles";
+import { ModifierTierBadges } from "./ModifierTierBadges";
 
-type ModifierKind = "implicit" | "explicit";
+type ModifierKind = "implicit" | "explicit" | "enchant";
 
 export function ItemPriceCheckOptions(props: {
   item: Poe2Item;
@@ -42,7 +44,9 @@ export function ItemPriceCheckOptions(props: {
     const modifiers =
       kind === "implicit"
         ? item.item.implicitMods || []
-        : item.item.explicitMods || [];
+        : kind === "enchant"
+          ? item.item.enchantMods || []
+          : item.item.explicitMods || [];
     const current = props.modifierSelection?.[kind] || [];
     const values = modifiers.map(
       (_modifier, modifierIndex) => current[modifierIndex] !== false,
@@ -169,7 +173,17 @@ export function ItemPriceCheckOptions(props: {
                     }
                     className="form-checkbox mt-1 text-blue-600"
                   />
-                  <span>{formatItemMod(mod)}</span>
+                  <span className="modifier-line">
+                    <span>{formatItemMod(mod)}</span>
+                    <ModifierTierBadges
+                      tiers={getItemModifierTierLabels(
+                        item,
+                        "implicit",
+                        index,
+                        mod,
+                      )}
+                    />
+                  </span>
                 </label>
               </li>
             ))}
@@ -182,8 +196,38 @@ export function ItemPriceCheckOptions(props: {
           <h3 className="font-semibold text-purple-300 mb-1">Enchant Mods:</h3>
           <ul className="list-none text-sm text-left space-y-1">
             {item.item.enchantMods.map((mod, index) => (
-              <li key={index} className="text-purple-200">
-                {formatItemMod(mod)}
+              <li
+                key={index}
+                className={modifierColorClass(
+                  getModifierDisplayKind(item, "enchant", index),
+                )}
+              >
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    aria-label={`Include enchant modifier: ${formatItemMod(mod)}`}
+                    checked={isModifierSelected("enchant", index)}
+                    onChange={(event) =>
+                      updateModifierSelection(
+                        "enchant",
+                        index,
+                        event.target.checked,
+                      )
+                    }
+                    className="form-checkbox mt-1 text-purple-600"
+                  />
+                  <span className="modifier-line">
+                    <span>{formatItemMod(mod)}</span>
+                    <ModifierTierBadges
+                      tiers={getItemModifierTierLabels(
+                        item,
+                        "enchant",
+                        index,
+                        mod,
+                      )}
+                    />
+                  </span>
+                </label>
               </li>
             ))}
           </ul>
@@ -213,7 +257,17 @@ export function ItemPriceCheckOptions(props: {
                   }
                   className="form-checkbox mt-1 text-blue-600"
                 />
-                <span>{formatItemMod(mod)}</span>
+                <span className="modifier-line">
+                  <span>{formatItemMod(mod)}</span>
+                  <ModifierTierBadges
+                    tiers={getItemModifierTierLabels(
+                      item,
+                      "explicit",
+                      index,
+                      mod,
+                    )}
+                  />
+                </span>
               </label>
             </li>
           ))}
