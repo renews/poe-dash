@@ -3,6 +3,8 @@ import { Leagues } from "../src/data/leagues";
 
 test("lists the current Path of Exile 2 leagues", () => {
   expect(Leagues).toEqual([
+    "Forbidden Rites",
+    "HC Forbidden Rites",
     "Runes of Aldur",
     "HC Runes of Aldur",
     "Standard",

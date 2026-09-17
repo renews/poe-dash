@@ -1,4 +1,6 @@
 export const Leagues = [
+  'Forbidden Rites',
+  'HC Forbidden Rites',
   'Runes of Aldur',
   'HC Runes of Aldur',
   'Standard',
