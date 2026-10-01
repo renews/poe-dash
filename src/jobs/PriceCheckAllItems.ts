@@ -58,6 +58,7 @@ export class PriceCheckAllItems extends Job<PriceCheckItemOutcome> {
   onItemStart: (progress: PriceCheckItemProgress) => Promise<void> | void =
     async () => {};
   onRequestState: (state: ApiRequestState) => void = () => {};
+  onEstimate: (item: Poe2Item, estimate: Estimate) => void = () => {};
 
   constructor(
     private filteredItems: Poe2Item[],
@@ -125,6 +126,9 @@ export class PriceCheckAllItems extends Job<PriceCheckItemOutcome> {
             {
               signal: this.signal,
               onState: (state) => this.onRequestState(state),
+              onEstimate: (estimate) => {
+                if (!this.signal.aborted) this.onEstimate(item, estimate);
+              },
             },
           );
           yield {

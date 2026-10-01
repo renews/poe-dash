@@ -53,6 +53,7 @@ export type ComparablePrice = Price & {
   item?: Poe2Item;
 };
 export type Estimate = {
+  provisional?: boolean;
   checkedAt?: number;
   listingAgeAdjustmentFactor?: number;
   matchesCurrentPrice?: boolean;
@@ -128,6 +129,7 @@ const SUPPORTED_TRADE_RARITIES = new Set([
 export type CurrencyRates = Record<string, number>;
 
 export interface PriceEstimateRequestOptions extends ApiRequestRunOptions {
+  onEstimate?: (estimate: Estimate) => void;
   applyListingContext?: boolean;
   recordResult?: boolean;
   minimumIndependentSellers?: number;
@@ -1343,6 +1345,73 @@ class PriceEstimator {
       | undefined;
     let officialTradeError: unknown;
 
+    const createTradeEstimate = (
+      tradeEstimate: ReturnType<PriceEstimator["priceEstimate"]>,
+      tradeSearch?: Poe2TradeSearch,
+    ): Estimate => {
+      const usesAwakenedMarket =
+        tradeSearch?.strategy === "market-properties" ||
+        tradeSearch?.strategy === "market-pseudos";
+      const estimate: Estimate = {
+        checkedAt: Date.now(),
+        ...tradeEstimate,
+        source: "official-trade",
+        method: "median",
+        search: {
+          league: itemLeague,
+          baseType,
+          category: metadata.category,
+          name,
+          rarity: usesAwakenedMarket ? "nonunique" : rarity,
+          ...(includeItemLevel && metadata.itemLevel !== undefined
+            ? { itemLevel: metadata.itemLevel }
+            : {}),
+          ...(requiredLevelRange
+            ? {
+                requiredLevelMin: requiredLevelRange.min,
+                requiredLevelMax: requiredLevelRange.max,
+              }
+            : {}),
+          ...(runeSocketCount !== undefined ? { runeSocketCount } : {}),
+          ...(tradeSearch?.strategy
+            ? {
+                strategy: tradeSearch.strategy,
+                selectedModifierCount: tradeSearch.selectedModifierCount,
+                minimumModifierCount: tradeSearch.minimumModifierCount,
+              }
+            : {}),
+          ...(tradeSearch?.strategy === "market-properties"
+            ? {
+                marketProperty: tradeSearch.marketProperty,
+                marketPropertyMinimum: tradeSearch.marketPropertyMinimum,
+              }
+            : {}),
+          modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
+          explicitCount: selectedExplicits.length,
+          implicitCount: selectedImplicits.length,
+          enchantCount: selectedEnchants.length,
+          explicitHashes: selectedExplicits.map((modifier) => modifier.hash),
+          implicitHashes: selectedImplicits.map((modifier) => modifier.hash),
+          enchantHashes: selectedEnchants.map((modifier) => modifier.hash),
+          ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
+          modifierRangePercent: normalizeModifierRangePercent(
+            modifierRangePercent,
+          ),
+        },
+      };
+
+      if (
+        tradeSearch?.strategy === "one-mod-relaxed" ||
+        tradeSearch?.strategy === "modifier-count-relaxed" ||
+        (usesAwakenedMarket &&
+          (tradeSearch?.minimumModifierCount || 0) <
+            (tradeSearch?.selectedModifierCount || 0))
+      ) {
+        estimate.confidence = "low";
+      }
+      return estimate;
+    };
+
     try {
       let lastEvaluatedSearchId: string | undefined;
       const evaluateTradeMatch = async (match: Poe2TradeSearch) => {
@@ -1353,6 +1422,25 @@ class PriceEstimator {
           currency,
           itemLeague,
           options,
+          (prices) => {
+            if (!options.onEstimate || options.signal?.aborted) return;
+            let summary: ReturnType<PriceEstimator["priceEstimate"]>;
+            try {
+              summary = this.priceEstimate(prices, {
+                minimumIndependentSellers:
+                  options.minimumIndependentSellers ??
+                  DEFAULT_MINIMUM_INDEPENDENT_SELLERS,
+              });
+            } catch {
+              return; // Wait for usable evidence before showing a price.
+            }
+            const preview = createTradeEstimate(summary, match);
+            preview.provisional = true;
+            if (options.applyListingContext !== false) {
+              this.applyListingAgeAdjustment(item, preview);
+            }
+            options.onEstimate(preview);
+          },
         );
         if (allPrices.length) {
           await this.fetchManyExchangeRates(
@@ -1435,66 +1523,7 @@ class PriceEstimator {
       );
     }
 
-    const usesAwakenedMarket =
-      tradeSearch?.strategy === "market-properties" ||
-      tradeSearch?.strategy === "market-pseudos";
-    const estimate: Estimate = {
-      checkedAt: Date.now(),
-      ...tradeEstimate,
-      source: "official-trade",
-      method: "median",
-      search: {
-        league: itemLeague,
-        baseType,
-        category: metadata.category,
-        name,
-        rarity: usesAwakenedMarket ? "nonunique" : rarity,
-        ...(includeItemLevel && metadata.itemLevel !== undefined
-          ? { itemLevel: metadata.itemLevel }
-          : {}),
-        ...(requiredLevelRange
-          ? {
-              requiredLevelMin: requiredLevelRange.min,
-              requiredLevelMax: requiredLevelRange.max,
-            }
-          : {}),
-        ...(runeSocketCount !== undefined ? { runeSocketCount } : {}),
-        ...(tradeSearch?.strategy
-          ? {
-              strategy: tradeSearch.strategy,
-              selectedModifierCount: tradeSearch.selectedModifierCount,
-              minimumModifierCount: tradeSearch.minimumModifierCount,
-            }
-          : {}),
-        ...(tradeSearch?.strategy === "market-properties"
-          ? {
-              marketProperty: tradeSearch.marketProperty,
-              marketPropertyMinimum: tradeSearch.marketPropertyMinimum,
-            }
-          : {}),
-        modifierComparisonVersion: MODIFIER_COMPARISON_VERSION,
-        explicitCount: selectedExplicits.length,
-        implicitCount: selectedImplicits.length,
-        enchantCount: selectedEnchants.length,
-        explicitHashes: selectedExplicits.map((modifier) => modifier.hash),
-        implicitHashes: selectedImplicits.map((modifier) => modifier.hash),
-        enchantHashes: selectedEnchants.map((modifier) => modifier.hash),
-        ...(metadata.corrupted ? { corrupted: metadata.corrupted } : {}),
-        modifierRangePercent: normalizeModifierRangePercent(
-          modifierRangePercent,
-        ),
-      },
-    };
-
-    if (
-      tradeSearch?.strategy === "one-mod-relaxed" ||
-      tradeSearch?.strategy === "modifier-count-relaxed" ||
-      (usesAwakenedMarket &&
-        (tradeSearch?.minimumModifierCount || 0) <
-          (tradeSearch?.selectedModifierCount || 0))
-    ) {
-      estimate.confidence = "low";
-    }
+    const estimate = createTradeEstimate(tradeEstimate, tradeSearch);
 
     console.log({ allPrices, estimate, item });
     return this.finishEstimate(item, estimate, itemLeague, options);
@@ -1676,6 +1705,25 @@ class PriceEstimator {
     }
   }
 
+  private applyListingAgeAdjustment(item: Poe2Item, estimate: Estimate) {
+    const listingAgeAdjustmentFactor = getListingSuggestionPriceFactor(
+      item.listing?.indexed,
+    );
+    estimate.listingAgeAdjustmentFactor = listingAgeAdjustmentFactor;
+    if (listingAgeAdjustmentFactor !== 1) {
+      const precisePrice = getPrecisePrice(estimate.price);
+      const preciseSpread = getPrecisePrice(estimate.stdDev);
+      estimate.price = {
+        amount: precisePrice.amount * listingAgeAdjustmentFactor,
+        currency: precisePrice.currency,
+      };
+      estimate.stdDev = {
+        amount: preciseSpread.amount * listingAgeAdjustmentFactor,
+        currency: preciseSpread.currency,
+      };
+    }
+  }
+
   private async finishEstimate(
     item: Poe2Item,
     estimate: Estimate,
@@ -1683,22 +1731,7 @@ class PriceEstimator {
     options: PriceEstimateRequestOptions,
   ) {
     if (options.applyListingContext !== false) {
-      const listingAgeAdjustmentFactor = getListingSuggestionPriceFactor(
-        item.listing?.indexed,
-      );
-      estimate.listingAgeAdjustmentFactor = listingAgeAdjustmentFactor;
-      if (listingAgeAdjustmentFactor !== 1) {
-        const precisePrice = getPrecisePrice(estimate.price);
-        const preciseSpread = getPrecisePrice(estimate.stdDev);
-        estimate.price = {
-          amount: precisePrice.amount * listingAgeAdjustmentFactor,
-          currency: precisePrice.currency,
-        };
-        estimate.stdDev = {
-          amount: preciseSpread.amount * listingAgeAdjustmentFactor,
-          currency: preciseSpread.currency,
-        };
-      }
+      this.applyListingAgeAdjustment(item, estimate);
     }
 
     estimate.price = await this.upscalePrice(estimate.price, itemLeague, options);
@@ -1968,6 +2001,7 @@ class PriceEstimator {
     currency = "exalted",
     league?: string,
     options: PriceEstimateRequestOptions = {},
+    onBatch?: (prices: ComparablePrice[]) => void,
   ): Promise<ComparablePrice[]> {
     const maximumListings = Math.min(
       DEFAULT_MAX_TRADE_LISTINGS,
@@ -2023,6 +2057,8 @@ class PriceEstimator {
         listedCurrency: item.listing.price.currency,
         item,
       }));
+
+      if (!options.signal?.aborted) onBatch?.(comparablePrices);
 
       if (
         Math.min(offset + 10, ids.length, maximumListings) >= minimumListings &&

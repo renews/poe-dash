@@ -226,9 +226,15 @@ export function PriceCheckPageView(props: PriceCheckPageViewProps) {
               <div className="price-check-status__message">
                 {isChecking ? (
                   <>
-                    <strong>Checking price…</strong>
+                    <strong>
+                      {props.estimate?.provisional
+                        ? "Provisional price"
+                        : "Checking price…"}
+                    </strong>
                     <span>
-                      Searching comparable listings in {props.selectedLeague}.
+                      {props.estimate?.provisional
+                        ? `${formatSuggestedPriceLabel(props.estimate.price)} based on ${props.estimate.sourceComparableCount || 0} listings. Updating as more arrive.`
+                        : `Searching comparable listings in ${props.selectedLeague}.`}
                     </span>
                   </>
                 ) : (
@@ -418,6 +424,9 @@ export function PriceCheckPage(props: {
             ? modifierSelectionRef.current
             : undefined,
           signal: controller.signal,
+          onEstimate: (estimate) => {
+            if (!controller.signal.aborted) setEstimate(estimate);
+          },
         });
         if (controller.signal.aborted) {
           return;
@@ -428,6 +437,7 @@ export function PriceCheckPage(props: {
         setModifierSelection(result.selection);
       } catch (nextError) {
         if (!controller.signal.aborted) {
+          setEstimate(undefined);
           setError(getErrorMessage(nextError));
         }
       } finally {

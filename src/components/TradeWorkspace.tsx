@@ -181,10 +181,13 @@ export const MarketInspector: React.FC<{
           { amount: range.maximum, currency: range.currency },
         ]
       : [];
-  const [minimumPrice, medianPrice, maximumPrice] = useUpscaledPrices(
-    rangePrices,
+  const upscaledRangePrices = useUpscaledPrices(
+    estimate?.provisional ? [] : rangePrices,
     estimate?.search.league || league,
   );
+  const [minimumPrice, medianPrice, maximumPrice] = estimate?.provisional
+    ? rangePrices
+    : upscaledRangePrices;
   const comparables = estimate?.comparables || [];
   const reliableSellerCount =
     estimate?.source === "currency-exchange"
@@ -260,7 +263,9 @@ export const MarketInspector: React.FC<{
               </div>
             )}
             <div>
-              <dt>Recommended price</dt>
+              <dt>
+                {estimate?.provisional ? "Provisional price" : "Recommended price"}
+              </dt>
               <dd>{formatSuggestedPriceLabel(estimate?.price)}</dd>
             </div>
             <div>
@@ -280,6 +285,10 @@ export const MarketInspector: React.FC<{
               </dd>
             </div>
           </dl>
+
+          {estimate?.provisional && (
+            <p role="status">Updating price as more listings arrive.</p>
+          )}
 
           {estimate && (
             <section

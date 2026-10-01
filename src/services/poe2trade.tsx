@@ -291,7 +291,9 @@ class Poe2TradeService {
     items: string[],
     refresh = false,
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: ApiRequestRunOptions & {
+      onItems?: (items: Poe2Item[]) => void;
+    } = {},
   ) {
     const allItems: Poe2Item[] = [];
     const itemsToFetch: string[] = [];
@@ -310,6 +312,9 @@ class Poe2TradeService {
       }
     }
 
+    if (allItems.length && !options.signal?.aborted) {
+      options.onItems?.([...allItems]);
+    }
     items = itemsToFetch;
 
     while (items.length) {
@@ -322,6 +327,7 @@ class Poe2TradeService {
       );
 
       allItems.push(...response.result);
+      if (!options.signal?.aborted) options.onItems?.([...allItems]);
       items = items.slice(10);
     }
     return allItems;

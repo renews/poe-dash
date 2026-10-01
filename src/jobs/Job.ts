@@ -22,7 +22,7 @@ export abstract class Job<T> {
 
   abstract _task(): AsyncGenerator<Progress<T>>;
 
-  protected get signal() {
+  get signal() {
     return this.requestAbortController.signal;
   }
 

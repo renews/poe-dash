@@ -30,6 +30,7 @@ interface CopiedItemPriceCheckOptions {
   modifierRangePercent: number;
   selection?: CopiedItemModifierSelectionInput;
   signal?: AbortSignal;
+  onEstimate?: (estimate: Estimate) => void;
   estimateItemPrice?: EstimateItemPrice;
 }
 
@@ -67,6 +68,9 @@ export async function checkCopiedItemPrice(
       recordResult: false,
       minimumIndependentSellers: DEFAULT_MINIMUM_INDEPENDENT_SELLERS,
       maxTradeListings: 100,
+      onEstimate: (estimate) => {
+        if (!options.signal?.aborted) options.onEstimate?.(estimate);
+      },
     },
   );
 

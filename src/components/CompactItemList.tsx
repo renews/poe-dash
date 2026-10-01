@@ -172,7 +172,9 @@ export function CompactItemList(props: {
                     const itemName = getItemName(item);
                     const estimate = props.priceEstimates[item.id];
                     const isChecking = checkingItemIds.has(item.id);
-                    const priceCheckError = props.priceCheckErrors?.[item.id];
+                    const priceCheckError = estimate?.provisional
+                      ? undefined
+                      : props.priceCheckErrors?.[item.id];
                     const optionsExpanded = expandedItemIds.has(item.id);
                     const optionsId = `compact-price-check-options-${item.id}`;
                     const gemLevel = getItemGemLevel(item);
@@ -251,7 +253,9 @@ export function CompactItemList(props: {
                                 )}
                           </span>
                           <span className="price-position-label">
-                            {priceCheckError
+                            {estimate?.provisional
+                              ? "Provisional"
+                              : priceCheckError
                               ? "Failed"
                               : estimate?.matchesCurrentPrice
                               ? "Fair"

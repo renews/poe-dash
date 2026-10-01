@@ -382,10 +382,10 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, [selectedLeague]);
 
-  const updateStashTabs = (items: Poe2Item[]) => {
+  const updateStashTabs = (items: Poe2Item[], resetSelection = true) => {
     const stashes = Poe2Trade.getStashTabs(items);
     setStashTabs(["All", ...sortStashTabNames(Object.keys(stashes))]);
-    setSelectedStash("All");
+    if (resetSelection) setSelectedStash("All");
   };
 
   const priceCheckItems = async (itemsToCheck: Poe2Item[]) => {
@@ -403,6 +403,15 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
 
     priceCheck.onCancel = async () => {
       setIsPriceChecking(false);
+      if (failureScope === priceCheckFailureScope.current) {
+        setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
+      }
+    };
+
+    priceCheck.onEstimate = (item, estimate) => {
+      if (failureScope === priceCheckFailureScope.current) {
+        setPriceEstimates((current) => ({ ...current, [item.id]: estimate }));
+      }
     };
 
     priceCheck.onStep = async (progress) => {
@@ -439,6 +448,12 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
     setErrorMessage("");
 
     const sync = new SyncAccount(name, selectedLeague);
+    const syncScope = getItemScope(name, selectedLeague);
+    const showItems = (items: Poe2Item[]) => {
+      if (sync.signal.aborted || activeItemScope.current !== syncScope) return;
+      setItems(items);
+      updateStashTabs(items, false);
+    };
 
     sync.onStep = async (progress) => {
       console.log("Sync step", progress);
@@ -447,9 +462,9 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
         progress.data,
         false,
         selectedLeague,
+        { signal: sync.signal, onItems: showItems },
       );
-      setItems(items);
-      updateStashTabs(items);
+      showItems(items);
     };
 
     try {
@@ -498,6 +513,16 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
         selectedLeague,
         selection,
         modifierRangePercent,
+        {
+          onEstimate: (estimate) => {
+            if (failureScope === priceCheckFailureScope.current) {
+              setPriceEstimates((current) => ({
+                ...current,
+                [item.id]: estimate,
+              }));
+            }
+          },
+        },
       );
       setPriceEstimates(PriceChecker.getCachedEstimates(selectedLeague));
       updatePriceCheckFailures(
@@ -614,6 +639,16 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({
               selectedLeague,
               selection,
               rangePercent,
+              {
+                onEstimate: (estimate) => {
+                  if (activeItemScope.current === scope) {
+                    setPriceEstimates((current) => ({
+                      ...current,
+                      [item.id]: estimate,
+                    }));
+                  }
+                },
+              },
             );
             setPriceEstimates(
               PriceChecker.getCachedEstimates(selectedLeague),
