@@ -95,9 +95,8 @@ export function parseRateLimitHeaders(
 
     for (let i = 0; i < limits.length; i++) {
       limits[i].used = state[i]?.limit;
-      if (state[i]?.reset) {
-        limits[i].reset = state[i].reset;
-      }
+      // The rule's third value is a potential penalty, not an active timeout.
+      limits[i].reset = state[i]?.reset || 0;
     }
 
     const ts = Date.now();
@@ -111,6 +110,7 @@ export class RateLimitParser {
   rules: RateLimitRule[] = [];
   private waitTail: Promise<void> = Promise.resolve();
   private blockedUntil = 0;
+  private nextRequestAt = 0;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly now: () => number;
 
@@ -123,6 +123,9 @@ export class RateLimitParser {
 
   parse(headers: RateLimitHeaders) {
     const parsed = parseRateLimitHeaders(headers);
+    for (const rule of parsed) {
+      rule.ts = this.now();
+    }
     this.clearOldRules();
 
     for (const rule of parsed) {
@@ -147,7 +150,7 @@ export class RateLimitParser {
       .map((rule) => ({
         ...rule,
         limits: rule.limits.filter(
-          (limit) => rule.ts + limit.window * 1000 > now,
+          (limit) => rule.ts + Math.max(limit.window, limit.reset) * 1000 > now,
         ),
       }))
       .filter((rule) => rule.limits.length > 0);
@@ -157,13 +160,19 @@ export class RateLimitParser {
     const waitTimes = [];
     this.clearOldRules();
 
-    const limits = this.rules.flatMap((r) => r.limits);
-    for (const limit of limits) {
-      const used = limit.used || 0;
-      if (used >= limit.limit - 1) {
-        waitTimes.push(Math.max(limit.reset, 1) * 1000);
-      } else if (used > 0 && limit.limit > 0) {
-        waitTimes.push((limit.window * 1000) / limit.limit);
+    const now = this.now();
+    for (const rule of this.rules) {
+      const elapsed = Math.max(0, now - rule.ts);
+      for (const limit of rule.limits) {
+        waitTimes.push(Math.max(0, limit.reset * 1000 - elapsed));
+        const used = limit.used || 0;
+        if (used > 0 && limit.limit > 0) {
+          // Near capacity, conservatively let the observed request window expire.
+          const interval = used >= limit.limit - 1
+            ? limit.window * 1000
+            : (limit.window * 1000) / limit.limit;
+          waitTimes.push(Math.max(0, interval - elapsed));
+        }
       }
     }
 
@@ -174,6 +183,7 @@ export class RateLimitParser {
     return Math.max(
       ...this.getWaitTimes(),
       this.blockedUntil - this.now(),
+      this.nextRequestAt - this.now(),
       minTime,
     );
   }
@@ -188,9 +198,21 @@ export class RateLimitParser {
   waitForLimit(minTime = 0) {
     const scheduledWait = this.waitTail.then(async () => {
       const waitTime = this.getWaitTime(minTime);
+      const spacing = Math.max(
+        0,
+        ...this.rules.flatMap((rule) =>
+          rule.limits.map((limit) =>
+            (limit.used || 0) > 0 && limit.limit > 0
+              ? (limit.window * 1000) / limit.limit
+              : 0,
+          ),
+        ),
+      );
       if (waitTime > 0) {
         await this.sleep(waitTime);
       }
+      // Reserve spacing even when another caller arrives before this response.
+      this.nextRequestAt = this.now() + spacing;
     });
     this.waitTail = scheduledWait.catch(() => undefined);
     return scheduledWait;
