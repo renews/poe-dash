@@ -56,13 +56,22 @@ export function sanitizeProxyRequestHeaders(headers: IncomingHttpHeaders) {
 export function sanitizeProxyResponseHeaders(
   headers: Record<string, string | string[]>,
 ) {
-  return Object.fromEntries(
+  const sanitized = Object.fromEntries(
     Object.entries(headers).filter(
       ([name]) =>
         name.toLowerCase() !== "content-encoding" &&
         name.toLowerCase() !== "set-cookie",
     ),
   );
+  const exposed = Object.keys(sanitized).filter(
+    (name) =>
+      name.toLowerCase().startsWith("x-rate-limit-") ||
+      name.toLowerCase() === "retry-after",
+  );
+  if (exposed.length) {
+    sanitized["access-control-expose-headers"] = exposed.join(", ");
+  }
+  return sanitized;
 }
 
 export function isAllowedRendererOrigin(

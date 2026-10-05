@@ -136,6 +136,10 @@ export interface PriceEstimateRequestOptions extends ApiRequestRunOptions {
   maxTradeListings?: number;
 }
 
+interface CurrencyConversionOptions extends ApiRequestRunOptions {
+  cachedRatesOnly?: boolean;
+}
+
 export interface PriceAnalysisOptions {
   minimumIndependentSellers?: number;
 }
@@ -1442,15 +1446,6 @@ class PriceEstimator {
             options.onEstimate(preview);
           },
         );
-        if (allPrices.length) {
-          await this.fetchManyExchangeRates(
-            currency,
-            allPrices.map((price) => price.currency),
-            itemLeague,
-            options,
-          );
-        }
-
         try {
           tradeEstimate = this.priceEstimate(allPrices, {
             minimumIndependentSellers:
@@ -1734,12 +1729,19 @@ class PriceEstimator {
       this.applyListingAgeAdjustment(item, estimate);
     }
 
-    estimate.price = await this.upscalePrice(estimate.price, itemLeague, options);
+    if (estimate.source !== "official-trade" && !options.signal?.aborted) {
+      options.onEstimate?.({ ...estimate, provisional: true });
+    }
+    // Display formatting and listing comparison must not hold up a usable quote.
+    const conversionOptions = { ...options, cachedRatesOnly: true };
+    estimate.price = await this.upscalePrice(
+      estimate.price, itemLeague, conversionOptions,
+    );
     if (estimate.stdDev.amount > 0) {
       estimate.stdDev = await this.upscalePrice(
         estimate.stdDev,
         itemLeague,
-        options,
+        conversionOptions,
       );
     }
     if (options.applyListingContext !== false) {
@@ -1747,7 +1749,7 @@ class PriceEstimator {
         item,
         estimate.price,
         itemLeague,
-        options,
+        conversionOptions,
         estimate.stdDev,
       );
     }
@@ -1910,7 +1912,7 @@ class PriceEstimator {
     item: Poe2Item,
     suggestedPrice: Price,
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
     spread?: Price,
   ) {
     return (
@@ -1929,7 +1931,7 @@ class PriceEstimator {
     suggestedPrice: Price,
     spread?: Price,
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
   ): Promise<PricePosition> {
     const listedPrice = item.listing?.price;
     if (!listedPrice) {
@@ -1963,7 +1965,7 @@ class PriceEstimator {
       );
     } catch (error) {
       rethrowIfRequestCancelled(error, options);
-      console.warn("Unable to compare suggested and listed prices", error);
+      if (!options.cachedRatesOnly) console.warn("Unable to compare suggested and listed prices", error);
       return "unpriced";
     }
   }
@@ -2026,6 +2028,47 @@ class PriceEstimator {
     );
     const fetchedItems: Poe2Item[] = [];
     let comparablePrices: ComparablePrice[] = [];
+    const attemptedCurrencies = new Set<string>();
+    let lastPreview = "";
+    const toComparables = (prices: Price[]) =>
+      fetchedItems.map((item, index) => ({
+        ...prices[index],
+        itemId: item.id,
+        listedAmount: item.listing.price.amount,
+        listedCurrency: item.listing.price.currency,
+        item,
+      }));
+    const listedPrices = () => fetchedItems.map((item) => item.listing.price);
+    const normalizedPrices = () =>
+      toComparables(this.toEquivalentPrices(currency, listedPrices(), league));
+    const publishAvailablePrices = () => {
+      if (!onBatch || options.signal?.aborted) return;
+      const nativeGroups = new Map<string, ComparablePrice[]>();
+      for (const price of toComparables(listedPrices())) {
+        const group = nativeGroups.get(price.currency) || [];
+        group.push(price);
+        nativeGroups.set(price.currency, group);
+      }
+      // Never mix unconverted currencies into a median. Prefer the largest
+      // reliable sample we can already price without another API response.
+      const candidates = [
+        normalizedPrices().filter(
+          (price) => Number.isFinite(price.amount) && price.amount > 0,
+        ),
+        ...nativeGroups.values(),
+      ];
+      const preview = candidates.sort(
+        (a, b) => analyzeComparablePrices(b).included.length -
+          analyzeComparablePrices(a).included.length,
+      )[0];
+      if (!preview?.length) return;
+      const signature = JSON.stringify(
+        preview.map((price) => [price.itemId, price.amount, price.currency]),
+      );
+      if (signature === lastPreview) return;
+      lastPreview = signature;
+      onBatch(preview);
+    };
 
     for (
       let offset = 0;
@@ -2038,27 +2081,18 @@ class PriceEstimator {
       );
       fetchedItems.push(...(batch.result || []));
 
+      publishAvailablePrices();
       const currencies = Poe2Trade.toUniqueItems(
         fetchedItems.map((item) => item.listing.price.currency),
+      ).filter((listedCurrency) =>
+        listedCurrency !== currency && !attemptedCurrencies.has(listedCurrency),
       );
-      await this.fetchManyExchangeRates(currency, currencies, league, options);
-      const normalizedPrices = this.toEquivalentPrices(
-        currency,
-        fetchedItems.map((item) => ({
-          amount: item.listing.price.amount,
-          currency: item.listing.price.currency,
-        })),
-        league,
+      currencies.forEach((listedCurrency) => attemptedCurrencies.add(listedCurrency));
+      await this.fetchManyExchangeRates(
+        currency, currencies, league, options, publishAvailablePrices,
       );
-      comparablePrices = fetchedItems.map((item, index) => ({
-        ...normalizedPrices[index],
-        itemId: item.id,
-        listedAmount: item.listing.price.amount,
-        listedCurrency: item.listing.price.currency,
-        item,
-      }));
-
-      if (!options.signal?.aborted) onBatch?.(comparablePrices);
+      comparablePrices = normalizedPrices();
+      publishAvailablePrices();
 
       if (
         Math.min(offset + 10, ids.length, maximumListings) >= minimumListings &&
@@ -2084,7 +2118,7 @@ class PriceEstimator {
   async upscalePrice(
     price: Price,
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
   ) {
     try {
       if (price.currency === "exalted") {
@@ -2127,7 +2161,7 @@ class PriceEstimator {
             }
           } catch (error) {
             rethrowIfRequestCancelled(error, options);
-            console.warn("Unable to promote price to divine", error);
+            if (!options.cachedRatesOnly) console.warn("Unable to promote price to divine", error);
           }
 
           return chaosPrice;
@@ -2196,7 +2230,7 @@ class PriceEstimator {
       }
     } catch (error) {
       rethrowIfRequestCancelled(error, options);
-      console.warn("Unable to promote suggested price currency", error);
+      if (!options.cachedRatesOnly) console.warn("Unable to promote suggested price currency", error);
     }
 
     return price;
@@ -2205,7 +2239,7 @@ class PriceEstimator {
   async upscalePrices(
     prices: Price[],
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
   ) {
     const upscaledPrices: Price[] = [];
 
@@ -2220,7 +2254,7 @@ class PriceEstimator {
     total: Price,
     elapsedMilliseconds: number,
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
   ) {
     const preciseTotal = getPrecisePrice(total);
     const elapsedHours = elapsedMilliseconds / 3_600_000;
@@ -2242,7 +2276,7 @@ class PriceEstimator {
   async promoteDivineToMirror(
     price: Price,
     league?: string,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
   ) {
     try {
       const mirrorRate = await this.exchangeRate(
@@ -2263,7 +2297,7 @@ class PriceEstimator {
       }
     } catch (error) {
       rethrowIfRequestCancelled(error, options);
-      console.warn("Unable to promote suggested price to mirror", error);
+      if (!options.cachedRatesOnly) console.warn("Unable to promote suggested price to mirror", error);
     }
 
     return price;
@@ -2449,10 +2483,12 @@ class PriceEstimator {
     iHave: string[],
     league?: string,
     options: ApiRequestRunOptions = {},
+    onRate?: () => void,
   ) {
     for (const currency of Poe2Trade.toUniqueItems(iHave)) {
       try {
         await this.exchangeRate(iWant, currency, league, false, options);
+        if (!options.signal?.aborted) onRate?.();
       } catch (error) {
         rethrowIfRequestCancelled(error, options);
         console.warn(
@@ -2494,7 +2530,7 @@ class PriceEstimator {
     iHave: string,
     league?: string,
     forceRefresh = false,
-    options: ApiRequestRunOptions = {},
+    options: CurrencyConversionOptions = {},
   ) {
     const cached = this.getCachedExchangeRates(iWant, iHave, league);
 
@@ -2510,6 +2546,10 @@ class PriceEstimator {
     if (iWant === iHave) {
       await this.cacheExchangeRates(iWant, iHave, 1, league);
       return 1;
+    }
+
+    if (options.cachedRatesOnly) {
+      throw new Error(`No cached exchange rate for ${iHave} to ${iWant}.`);
     }
 
     try {

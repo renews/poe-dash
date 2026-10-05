@@ -1,3 +1,4 @@
+import type { ApiRequestRunOptions } from "./ApiRequestQueue";
 import { parseCopiedItemText } from "./copiedItemParser";
 import { completeModifierSelection } from "./modifierSelection";
 import {
@@ -30,6 +31,7 @@ interface CopiedItemPriceCheckOptions {
   modifierRangePercent: number;
   selection?: CopiedItemModifierSelectionInput;
   signal?: AbortSignal;
+  onState?: ApiRequestRunOptions["onState"];
   onEstimate?: (estimate: Estimate) => void;
   estimateItemPrice?: EstimateItemPrice;
 }
@@ -64,6 +66,8 @@ export async function checkCopiedItemPrice(
     options.modifierRangePercent,
     {
       signal: options.signal,
+      priority: "interactive",
+      onState: options.onState,
       applyListingContext: false,
       recordResult: false,
       minimumIndependentSellers: DEFAULT_MINIMUM_INDEPENDENT_SELLERS,

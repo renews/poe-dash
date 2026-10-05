@@ -291,7 +291,7 @@ test("invalidates a displayed quote when pricing filters change", async () => {
   expect(handler).toContain("activeRequest.current?.abort()");
   expect(handler).toContain("setEstimate(undefined)");
   expect(source).toContain("officialTradeRequest.current?.abort()");
-  expect(source).toContain("{ signal: controller.signal }");
+  expect(source).toContain('signal: controller.signal, priority: "interactive"');
   expect(source).toContain("if (controller.signal.aborted)");
 });
 
@@ -355,4 +355,14 @@ test("gives textareas the shared typography and keyboard focus treatment", async
   expect(css).toMatch(
     /input:focus-visible,\s*select:focus-visible,\s*textarea:focus-visible,/,
   );
+});
+
+test("shows the API cooldown while a manual check is waiting", () => {
+  const markup = renderToStaticMarkup(createElement(PriceCheckPageView, {
+    itemText: "copied item", selectedLeague: "Standard", status: "checking",
+    requestState: { status: "waiting", attempt: 0, delayMs: 60_000 },
+    shortcutStatus: { registered: true, shortcut: "Ctrl+D" },
+    onItemTextChange: () => {}, onSubmit: () => {},
+  }));
+  expect(markup).toContain("API cooldown: 60s remaining.");
 });

@@ -138,3 +138,19 @@ Item Level: 81
 
   expect(enchantSelection).toEqual([false, true]);
 });
+
+test("manual checks request interactive priority and forward request progress", async () => {
+  const states: string[] = [];
+  await checkCopiedItemPrice({
+    itemText: RING,
+    league: "Standard",
+    modifierRangePercent: 15,
+    onState: state => states.push(state.status),
+    estimateItemPrice: async (_item, _league, _selection, _range, options) => {
+      expect(options?.priority).toBe("interactive");
+      options?.onState?.({ status: "waiting", attempt: 0, delayMs: 60_000 });
+      return { price: { amount: 1, currency: "exalted" }, search: { explicitCount: 1 } } as Estimate;
+    },
+  });
+  expect(states).toEqual(["waiting"]);
+});

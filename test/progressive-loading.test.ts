@@ -271,3 +271,199 @@ test("a provisional price still requires the configured independent seller evide
     PriceChecker.upscalePrice = originalUpscale;
   }
 });
+
+test("publishes same-currency evidence before a slow exchange-rate response", async () => {
+  const originalFetch = Poe2Trade.fetchItems;
+  const originalRate = PriceChecker.exchangeRate;
+  const originalCached = PriceChecker.getCachedExchangeRates;
+  const snapshots: { amount: number; currency: string }[][] = [];
+  let release!: () => void;
+  const conversionGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const enteredConversion = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let rate: number | undefined;
+  Poe2Trade.fetchItems = async () => ({
+    result: [
+      listedItem("1"),
+      {
+        ...listedItem("2"),
+        listing: {
+          ...listedItem("2").listing,
+          price: { amount: 2, currency: "divine" },
+        },
+      },
+    ],
+  });
+  PriceChecker.getCachedExchangeRates = (want, have) =>
+    want === have ? 1 : rate;
+  PriceChecker.exchangeRate = async (want, have) => {
+    if (want === have) return 1;
+    entered();
+    await conversionGate;
+    rate = 100;
+    return rate;
+  };
+  try {
+    const pending = PriceChecker.getPricesForItemIds(
+      ["1", "2"],
+      "exalted",
+      "Standard",
+      {},
+      (prices) =>
+        snapshots.push(
+          prices.map(({ amount, currency }) => ({ amount, currency })),
+        ),
+    );
+    await enteredConversion;
+    const beforeConversion = [...snapshots];
+    release();
+    await pending;
+    expect(beforeConversion).toEqual([[{ amount: 11, currency: "exalted" }]]);
+    expect(snapshots.at(-1)).toEqual([
+      { amount: 11, currency: "exalted" },
+      { amount: 200, currency: "exalted" },
+    ]);
+  } finally {
+    release();
+    Poe2Trade.fetchItems = originalFetch;
+    PriceChecker.exchangeRate = originalRate;
+    PriceChecker.getCachedExchangeRates = originalCached;
+  }
+});
+
+test("finishing a usable quote does not request currency rates just for formatting", async () => {
+  const originalSearch = Poe2Trade.getItemByAttributes;
+  const originalFetch = Poe2Trade.fetchItems;
+  const originalOverview = Poe2Trade.client.getCurrencyExchangeOverview;
+  const originalSwaps = Poe2Trade.client.getCurrencySwaps;
+  const originalCached = PriceChecker.getCachedExchangeRates;
+  let extraRequests = 0;
+  const ids = Array.from({ length: 20 }, (_, i) => String(i));
+  Poe2Trade.getItemByAttributes = async () => ({
+    id: "search",
+    total: 20,
+    result: ids,
+  });
+  Poe2Trade.fetchItems = async (ids) => ({ result: ids.map(listedItem) });
+  PriceChecker.getCachedExchangeRates = (want, have) =>
+    want === have ? 1 : undefined;
+  Poe2Trade.client.getCurrencyExchangeOverview = async () => {
+    extraRequests++;
+    throw new Error("Unavailable");
+  };
+  Poe2Trade.client.getCurrencySwaps = async () => {
+    extraRequests++;
+    throw new Error("Unavailable");
+  };
+  try {
+    const result = await PriceChecker.estimateItemPrice(
+      listedItem("target"),
+      "Standard",
+      undefined,
+      12,
+      { recordResult: false },
+    );
+    expect(result.price.currency).toBe("exalted");
+    expect(result.sourceComparableCount).toBe(20);
+    expect(extraRequests).toBe(0);
+  } finally {
+    Poe2Trade.getItemByAttributes = originalSearch;
+    Poe2Trade.fetchItems = originalFetch;
+    Poe2Trade.client.getCurrencyExchangeOverview = originalOverview;
+    Poe2Trade.client.getCurrencySwaps = originalSwaps;
+    PriceChecker.getCachedExchangeRates = originalCached;
+  }
+});
+
+test("a failed currency conversion is attempted once across multiple listing batches", async () => {
+  const originalFetch = Poe2Trade.fetchItems;
+  const originalRate = PriceChecker.exchangeRate;
+  const originalCached = PriceChecker.getCachedExchangeRates;
+  let attempts = 0;
+  let batches = 0;
+  const previews: Estimate[] = [];
+  Poe2Trade.fetchItems = async (ids) => {
+    batches++;
+    return {
+      result: ids.map((id) => ({
+        ...listedItem(id),
+        listing: {
+          ...listedItem(id).listing,
+          price: { amount: 2, currency: "divine" },
+        },
+      })),
+    };
+  };
+  PriceChecker.getCachedExchangeRates = () => undefined;
+  PriceChecker.exchangeRate = async () => {
+    attempts++;
+    throw new Error("No exchange rate available");
+  };
+  try {
+    await PriceChecker.getPricesForItemIds(
+      Array.from({ length: 20 }, (_, i) => String(i)),
+      "exalted",
+      "Standard",
+      {},
+      (prices) => {
+        previews.push({
+          ...PriceChecker.priceEstimate(prices),
+          provisional: true,
+        } as Estimate);
+      },
+    );
+    expect(batches).toBe(2);
+    expect(attempts).toBe(1);
+    expect(previews.map((preview) => preview.sourceComparableCount)).toEqual([
+      10, 20,
+    ]);
+    expect(
+      previews.every((preview) => preview.price.currency === "divine"),
+    ).toBe(true);
+  } finally {
+    Poe2Trade.fetchItems = originalFetch;
+    PriceChecker.exchangeRate = originalRate;
+    PriceChecker.getCachedExchangeRates = originalCached;
+  }
+});
+
+test("publishes each newly converted sample before starting the next currency request", async () => {
+  const originalFetch = Poe2Trade.fetchItems;
+  const originalRate = PriceChecker.exchangeRate;
+  const originalCached = PriceChecker.getCachedExchangeRates;
+  const rates = new Map<string, number>();
+  const sizes: number[] = [];
+  Poe2Trade.fetchItems = async () => ({
+    result: ["exalted", "divine", "chaos"].map((currency, i) => ({
+      ...listedItem(String(i)),
+      listing: {
+        ...listedItem(String(i)).listing,
+        price: { amount: 10, currency },
+      },
+    })),
+  });
+  PriceChecker.getCachedExchangeRates = (_want, have) => rates.get(have);
+  PriceChecker.exchangeRate = async (_want, have) => {
+    if (have === "chaos") expect(sizes).toEqual([1, 2]);
+    rates.set(have, 1);
+    return 1;
+  };
+  try {
+    await PriceChecker.getPricesForItemIds(
+      ["0", "1", "2"],
+      "exalted",
+      "Standard",
+      {},
+      (prices) => sizes.push(prices.length),
+    );
+    expect(sizes).toEqual([1, 2, 3]);
+  } finally {
+    Poe2Trade.fetchItems = originalFetch;
+    PriceChecker.exchangeRate = originalRate;
+    PriceChecker.getCachedExchangeRates = originalCached;
+  }
+});

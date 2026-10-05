@@ -12,7 +12,6 @@ import {
 } from "./ApiRequestQueue";
 import type { OfficialTradeStaticData } from "./OfficialExchangePricing";
 
-export const MIN_API_REQUEST_INTERVAL_MS = 2_500;
 export const TRADE_STATIC_CACHE_MS = 4 * 60 * 60 * 1_000;
 
 export function parseMirrorRateFromPage(html: string): number | undefined {
@@ -87,11 +86,8 @@ export function buildTradeStatFilters(
 }
 
 export class Poe2TradeClient {
-  private readonly requests = new ApiRequestQueue({
-    maxRetries: 2,
-    minIntervalMs: MIN_API_REQUEST_INTERVAL_MS,
-  });
-  private readonly metadataRequests = new ApiRequestQueue({ maxRetries: 2 });
+  private static readonly sharedRequests = new ApiRequestQueue({ maxRetries: 2 });
+  constructor(private readonly requests = Poe2TradeClient.sharedRequests) {}
   private tradeStaticDataCache?: {
     expiresAt: number;
     data: OfficialTradeStaticData;
@@ -138,7 +134,7 @@ export class Poe2TradeClient {
           },
           { timeout: this.requestTimeout, signal: options.signal },
         ),
-      options,
+      { ...options, rateLimitKey: "poe:search" },
     );
     return response.data as Poe2TradeSearch;
   }
@@ -165,7 +161,7 @@ export class Poe2TradeClient {
           },
           { timeout: this.requestTimeout, signal: options.signal },
         ),
-      options,
+      { ...options, rateLimitKey: "poe:search" },
     );
     return response.data as Poe2TradeSearch;
   }
@@ -296,7 +292,7 @@ export class Poe2TradeClient {
           timeout: this.requestTimeout,
           signal: options.signal,
         }),
-      options,
+      { ...options, rateLimitKey: "poe:search" },
     );
     return response.data as Poe2TradeSearch;
   }
@@ -343,7 +339,7 @@ export class Poe2TradeClient {
           },
           { timeout: this.requestTimeout, signal: options.signal },
         ),
-      options,
+      { ...options, rateLimitKey: "poe:search" },
     );
     return response.data as Poe2TradeSearch;
   }
@@ -358,7 +354,7 @@ export class Poe2TradeClient {
           `${this.apiUrl}/fetch/${items.slice(0, 10).join(",")}?&realm=poe2`,
           { timeout: this.requestTimeout, signal: options.signal },
         ),
-      options,
+      { ...options, rateLimitKey: "poe:fetch" },
     );
     return response.data as Poe2FetchItems;
   }
@@ -386,7 +382,7 @@ export class Poe2TradeClient {
           timeout: this.requestTimeout,
           signal: options.signal,
         }),
-      options,
+      { ...options, rateLimitKey: "poe:search" },
     );
     return response.data as Poe2ExchangeSearch;
   }
@@ -405,12 +401,13 @@ export class Poe2TradeClient {
       return waitForRequest(this.tradeStaticDataRequest, options.signal);
     }
 
-    const request = this.metadataRequests
+    const request = this.requests
       .run(
         () =>
           axios.get(`${this.apiUrl}/data/static`, {
             timeout: this.requestTimeout,
           }),
+        { priority: options.priority, rateLimitKey: "poe:static" },
       )
       .then((response) => {
         const data = response.data as OfficialTradeStaticData;
@@ -470,7 +467,7 @@ export class Poe2TradeClient {
           timeout: this.requestTimeout,
           signal: options.signal,
         }),
-      options,
+      { ...options, rateLimitKey: "poe:search" },
     );
     return response.data as Poe2ExchangeSearch;
   }
@@ -491,7 +488,7 @@ export class Poe2TradeClient {
           timeout: this.requestTimeout,
           signal: options.signal,
         }),
-      options,
+      { ...options, rateLimitKey: "ninja:overview" },
     );
     return response.data as Poe2CurrencyExchangeOverview;
   }
@@ -514,7 +511,7 @@ export class Poe2TradeClient {
           timeout: this.requestTimeout,
           signal: options.signal,
         }),
-      options,
+      { ...options, rateLimitKey: "poe2base:mirror" },
     );
     const rate = parseMirrorRateFromPage(response.data as string);
     if (rate === undefined) {

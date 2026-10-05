@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   parseRateLimitHeaders,
   RateLimitParser,
-} from "../electron/app/services/RateLimitParser";
+} from "../src/services/RateLimitParser";
 
 test("parses incomplete rate-limit state safely", () => {
   expect(() =>
@@ -24,18 +24,6 @@ test("parses incomplete rate-limit state safely", () => {
   expect(rule.limits[1].used).toBeUndefined();
 });
 
-test("serializes rate-limit waits so callers cannot burst together", async () => {
-  const delays: number[] = [];
-  const parser = new RateLimitParser({
-    sleep: async (milliseconds) => {
-      delays.push(milliseconds);
-    },
-  });
-
-  await Promise.all([parser.waitForLimit(100), parser.waitForLimit(100)]);
-  expect(delays).toEqual([100, 100]);
-});
-
 function rateLimitHeaders(state: string, limit = "3:5:60") {
   return {
     "x-rate-limit-policy": "trade-search",
@@ -48,7 +36,7 @@ function rateLimitHeaders(state: string, limit = "3:5:60") {
 test("waits for the request window instead of an inactive penalty", () => {
   const now = Date.now();
   const parser = new RateLimitParser({ now: () => now });
-  const [rule] = parser.parse(rateLimitHeaders("2:5:0"));
+  const [rule] = parser.parse(rateLimitHeaders("3:5:0"));
   rule.ts = now;
 
   expect(parser.getWaitTime()).toBe(5_000);
@@ -57,7 +45,7 @@ test("waits for the request window instead of an inactive penalty", () => {
 test("credits time already spent waiting for the request window", () => {
   let now = Date.now();
   const parser = new RateLimitParser({ now: () => now });
-  const [rule] = parser.parse(rateLimitHeaders("2:5:0"));
+  const [rule] = parser.parse(rateLimitHeaders("3:5:0"));
   rule.ts = now;
   now += 3_000;
 
@@ -90,24 +78,6 @@ test("honors an active restriction beyond the request window even below the limi
   expect(parser.getWaitTime()).toBe(0);
 });
 
-test("reserves request spacing for queued callers before a response arrives", async () => {
-  let now = Date.now();
-  const delays: number[] = [];
-  const parser = new RateLimitParser({
-    now: () => now,
-    sleep: async (milliseconds) => {
-      delays.push(milliseconds);
-      now += milliseconds;
-    },
-  });
-  const [rule] = parser.parse(rateLimitHeaders("1:60:0", "10:60:60"));
-  rule.ts = now;
-  now += 6_000;
-
-  await Promise.all([parser.waitForLimit(), parser.waitForLimit()]);
-  expect(delays).toEqual([6_000]);
-});
-
 test("keeps explicit blocking in force and uses the longest applicable wait", () => {
   let now = Date.now();
   const parser = new RateLimitParser({ now: () => now });
@@ -121,4 +91,10 @@ test("keeps explicit blocking in force and uses the longest applicable wait", ()
   expect(parser.getWaitTime()).toBe(6_000);
   now += 6_000;
   expect(parser.getWaitTime()).toBe(0);
+});
+
+test("uses API spacing while capacity remains instead of waiting a whole window early", () => {
+  const parser = new RateLimitParser({ now: () => 100_000 });
+  parser.parse(rateLimitHeaders("9:60:0", "10:60:60"));
+  expect(parser.getWaitTime()).toBe(6_000);
 });

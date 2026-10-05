@@ -1,4 +1,5 @@
 import axios from "axios";
+import { ApiRequestQueue } from "../src/services/ApiRequestQueue";
 import { expect, test } from "bun:test";
 import {
   getOfficialExchangePrice,
@@ -139,9 +140,7 @@ test("cancelling one static metadata wait does not cancel the shared request", a
       resolveRequest = resolve;
     },
   );
-  Object.assign(client, {
-    metadataRequests: { run: (request: () => Promise<unknown>) => request() },
-  });
+  Object.assign(client, { requests: new ApiRequestQueue({ maxRetries: 0 }) });
   axios.get = (async (...args: Parameters<typeof axios.get>) => {
     requestCount += 1;
     receivedSignal = args[1]?.signal;
@@ -191,9 +190,7 @@ test("retries static metadata after a rejected shared request", async () => {
     ],
   };
   let requestCount = 0;
-  Object.assign(client, {
-    metadataRequests: { run: (request: () => Promise<unknown>) => request() },
-  });
+  Object.assign(client, { requests: new ApiRequestQueue({ maxRetries: 0 }) });
   axios.get = (async () => {
     requestCount += 1;
     if (requestCount === 1) {

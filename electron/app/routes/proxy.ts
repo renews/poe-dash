@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { app, net, session, BrowserWindow } from "electron";
 import WebSocket from "ws";
-import { RateLimits } from "../services/RateLimitParser";
+import { bindProxyCancellation } from "../services/proxyCancellation";
 import {
   ALLOWED_PROXY_HOSTS,
   isAllowedProxyHost,
@@ -37,23 +37,19 @@ export const proxy = async (req: Request, res: Response) => {
       useSessionCookies: true,
       referrerPolicy: "no-referrer-when-downgrade",
     };
-    if (usePoeApiPolicy) {
-      await RateLimits.waitForLimit();
-    }
     const proxyReq = net.request(params);
+    bindProxyCancellation(req, res, proxyReq);
 
     const proxyReqStream = proxyReq as unknown as NodeJS.WritableStream;
 
     proxyReq.on("response", (proxyRes) => {
+      if (res.destroyed) return;
       const resHeaders = sanitizeProxyResponseHeaders(proxyRes.headers);
 
       if (usePoeApiPolicy && proxyRes.statusCode === 401) {
         openAuthWindow();
       }
 
-      if (usePoeApiPolicy) {
-        RateLimits.parse(proxyRes.headers);
-      }
       res.writeHead(proxyRes.statusCode, proxyRes.statusMessage, resHeaders);
 
       const proxyResStream = proxyRes as unknown as NodeJS.ReadableStream;
@@ -61,9 +57,14 @@ export const proxy = async (req: Request, res: Response) => {
     });
 
     proxyReq.on("error", (err) => {
+      if (res.destroyed || res.writableEnded) return;
       console.error(err);
-      res.writeHead(500);
-      res.end(err);
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.writeHead(502);
+      res.end("Upstream request failed");
     });
 
     req.pipe(proxyReqStream);

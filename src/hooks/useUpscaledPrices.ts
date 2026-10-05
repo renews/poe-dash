@@ -22,6 +22,7 @@ export function useUpscaledPrices(prices: Price[], league?: string) {
 
     void PriceChecker.upscalePrices(sourcePrices, league, {
       signal: controller.signal,
+      cachedRatesOnly: true,
     })
       .then((upscaledPrices) => {
         if (!controller.signal.aborted) {

@@ -1,5 +1,3 @@
-import { wait } from "./utils";
-
 interface RateLimitDetail {
   limit: number;
   window: number;
@@ -19,7 +17,6 @@ type RateLimitHeaderValue = string | string[] | number | undefined;
 type RateLimitHeaders = Record<string, RateLimitHeaderValue>;
 
 interface RateLimitParserOptions {
-  sleep?: (milliseconds: number) => Promise<void>;
   now?: () => number;
 }
 
@@ -108,16 +105,10 @@ export function parseRateLimitHeaders(
 
 export class RateLimitParser {
   rules: RateLimitRule[] = [];
-  private waitTail: Promise<void> = Promise.resolve();
   private blockedUntil = 0;
-  private nextRequestAt = 0;
-  private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly now: () => number;
 
   constructor(options: RateLimitParserOptions = {}) {
-    this.sleep =
-      options.sleep ||
-      ((milliseconds) => wait(milliseconds).then(() => undefined));
     this.now = options.now || Date.now;
   }
 
@@ -167,10 +158,11 @@ export class RateLimitParser {
         waitTimes.push(Math.max(0, limit.reset * 1000 - elapsed));
         const used = limit.used || 0;
         if (used > 0 && limit.limit > 0) {
-          // Near capacity, conservatively let the observed request window expire.
-          const interval = used >= limit.limit - 1
-            ? limit.window * 1000
-            : (limit.window * 1000) / limit.limit;
+          // At capacity, let the observed window expire before making another request.
+          const interval =
+            used >= limit.limit
+              ? limit.window * 1000
+              : (limit.window * 1000) / limit.limit;
           waitTimes.push(Math.max(0, interval - elapsed));
         }
       }
@@ -183,7 +175,6 @@ export class RateLimitParser {
     return Math.max(
       ...this.getWaitTimes(),
       this.blockedUntil - this.now(),
-      this.nextRequestAt - this.now(),
       minTime,
     );
   }
@@ -194,29 +185,4 @@ export class RateLimitParser {
       this.now() + Math.max(0, milliseconds),
     );
   }
-
-  waitForLimit(minTime = 0) {
-    const scheduledWait = this.waitTail.then(async () => {
-      const waitTime = this.getWaitTime(minTime);
-      const spacing = Math.max(
-        0,
-        ...this.rules.flatMap((rule) =>
-          rule.limits.map((limit) =>
-            (limit.used || 0) > 0 && limit.limit > 0
-              ? (limit.window * 1000) / limit.limit
-              : 0,
-          ),
-        ),
-      );
-      if (waitTime > 0) {
-        await this.sleep(waitTime);
-      }
-      // Reserve spacing even when another caller arrives before this response.
-      this.nextRequestAt = this.now() + spacing;
-    });
-    this.waitTail = scheduledWait.catch(() => undefined);
-    return scheduledWait;
-  }
 }
-
-export const RateLimits = new RateLimitParser();

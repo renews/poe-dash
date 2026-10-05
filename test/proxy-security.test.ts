@@ -89,3 +89,16 @@ test("does not expose upstream cookies to the renderer", () => {
     }),
   ).toEqual({ "content-type": ["application/json"] });
 });
+
+test("exposes upstream rate-limit headers to the renderer", () => {
+  const headers = sanitizeProxyResponseHeaders({
+    "X-Rate-Limit-Policy": "search",
+    "X-Rate-Limit-Rules": "ip,account",
+    "X-Rate-Limit-IP-State": "1:5:0",
+    "Retry-After": "60",
+    "set-cookie": "private",
+  });
+  expect(headers["access-control-expose-headers"]).toBe(
+    "X-Rate-Limit-Policy, X-Rate-Limit-Rules, X-Rate-Limit-IP-State, Retry-After",
+  );
+});

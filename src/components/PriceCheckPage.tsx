@@ -11,6 +11,7 @@ import {
   LoaderCircle,
   ScanSearch,
 } from "lucide-react";
+import type { ApiRequestState } from "../services/ApiRequestQueue";
 import { useAppContext } from "../contexts/AppContext";
 import { checkCopiedItemPrice } from "../services/copiedItemPriceCheck";
 import { parseCopiedItemText } from "../services/copiedItemParser";
@@ -41,6 +42,7 @@ interface PriceCheckPageViewProps {
   itemText: string;
   selectedLeague: string;
   status: PriceCheckStatus;
+  requestState?: ApiRequestState;
   shortcutStatus: PriceCheckShortcutStatus;
   error?: string;
   item?: Poe2Item;
@@ -121,6 +123,25 @@ export function prepareCopiedItemPreview(
 }
 
 export function PriceCheckPageView(props: PriceCheckPageViewProps) {
+  const [waitSeconds, setWaitSeconds] = useState(() =>
+    Math.ceil((props.requestState?.delayMs || 0) / 1000),
+  );
+  useEffect(() => {
+    const deadline = Date.now() + (props.requestState?.delayMs || 0);
+    const update = () =>
+      setWaitSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    update();
+    if (!props.requestState?.delayMs) return;
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [props.requestState]);
+  const requestMessage = props.requestState?.status === "waiting"
+    ? `API cooldown: ${waitSeconds}s remaining.`
+    : props.requestState?.status === "retrying"
+      ? `Retrying request in ${waitSeconds}s.`
+      : props.requestState?.status === "queued"
+        ? "Waiting for the current request to finish."
+        : undefined;
   const isChecking = props.status === "checking";
   const canSubmit = Boolean(props.itemText.trim()) && !isChecking;
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -236,6 +257,7 @@ export function PriceCheckPageView(props: PriceCheckPageViewProps) {
                         ? `${formatSuggestedPriceLabel(props.estimate.price)} based on ${props.estimate.sourceComparableCount || 0} listings. Updating as more arrive.`
                         : `Searching comparable listings in ${props.selectedLeague}.`}
                     </span>
+                    {requestMessage && <span>{requestMessage}</span>}
                   </>
                 ) : (
                   <span>
@@ -332,6 +354,7 @@ export function PriceCheckPage(props: {
     useState<ModifierSelection>();
   const modifierSelectionRef = useRef<ModifierSelection>();
   const [status, setStatus] = useState<PriceCheckStatus>("idle");
+  const [requestState, setRequestState] = useState<ApiRequestState>();
   const [error, setError] = useState<string>();
   const [isOpeningOfficialTrade, setIsOpeningOfficialTrade] = useState(false);
   const [shortcutStatus, setShortcutStatus] =
@@ -398,6 +421,7 @@ export function PriceCheckPage(props: {
       setEstimate(undefined);
       setError(undefined);
       setStatus("checking");
+      setRequestState(undefined);
       try {
         const preview = prepareCopiedItemPreview(
           nextText,
@@ -424,6 +448,9 @@ export function PriceCheckPage(props: {
             ? modifierSelectionRef.current
             : undefined,
           signal: controller.signal,
+          onState: (state) => {
+            if (!controller.signal.aborted) setRequestState(state);
+          },
           onEstimate: (estimate) => {
             if (!controller.signal.aborted) setEstimate(estimate);
           },
@@ -512,7 +539,7 @@ export function PriceCheckPage(props: {
         selectedLeague,
         modifierSelection,
         modifierRangePercent,
-        { signal: controller.signal },
+        { signal: controller.signal, priority: "interactive" },
       );
       if (controller.signal.aborted) {
         return;
@@ -553,6 +580,7 @@ export function PriceCheckPage(props: {
       modifierSelection={modifierSelection}
       selectedLeague={selectedLeague}
       status={status}
+      requestState={requestState}
       error={error}
       shortcutStatus={shortcutStatus}
       isOpeningOfficialTrade={isOpeningOfficialTrade}
