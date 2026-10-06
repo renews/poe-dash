@@ -28,6 +28,7 @@ import {
   type TradeSidebar,
 } from "../services/tradeSidebarState";
 import { ComparableItemHoverCard } from "./ComparableItemHoverCard";
+import { PriceCheckAge } from "./PriceCheckAge";
 import { CompactItemList } from "./CompactItemList";
 import { useUpscaledPrices } from "../hooks/useUpscaledPrices";
 
@@ -266,7 +267,10 @@ export const MarketInspector: React.FC<{
               <dt>
                 {estimate?.provisional ? "Provisional price" : "Recommended price"}
               </dt>
-              <dd>{formatSuggestedPriceLabel(estimate?.price)}</dd>
+              <dd>
+                {formatSuggestedPriceLabel(estimate?.price)}
+                <PriceCheckAge estimate={estimate} />
+              </dd>
             </div>
             <div>
               <dt>Confidence</dt>

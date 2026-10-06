@@ -426,3 +426,17 @@ test("uses the current-price color for a great detailed suggestion", () => {
   expect(markup).not.toContain("Already with a great price!");
   expect(markup).toContain('class="font-normal text-green-600">Great price!');
 });
+
+test("shows the age of an older saved price while keeping its suggestion visible", () => {
+  const item = createItem("old", "Shop", "Old Item", 2, "chaos");
+  const markup = renderToStaticMarkup(createElement(CompactItemList, {
+    items: [item], priceEstimates: { old: {
+      checkedAt: Date.now() - 2 * 60 * 60 * 1000,
+      price: { amount: 3, currency: "chaos" },
+    } as Estimate }, modifierSelections: {}, onPriceCheck: () => {},
+    onModifierSelectionChange: () => {}, onStashPriceCheck: () => {}, isPriceChecking: false,
+  }));
+  expect(markup).toContain("~3 chaos");
+  expect(markup).toContain("Last checked 2 hours ago");
+  expect(markup).not.toContain('data-price-status="unchecked"');
+});

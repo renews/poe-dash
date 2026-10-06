@@ -15,6 +15,7 @@ import {
   ModifierSelection,
   Poe2Item,
 } from "../services/types";
+import { PriceCheckAge } from "./PriceCheckAge";
 import { ItemPriceCheckOptions } from "./ItemPriceCheckOptions";
 
 function getItemName(item: Poe2Item) {
@@ -251,6 +252,7 @@ export function CompactItemList(props: {
                                   estimate?.price,
                                   estimate?.matchesCurrentPrice,
                                 )}
+                            {!priceCheckError && <PriceCheckAge estimate={estimate} />}
                           </span>
                           <span className="price-position-label">
                             {estimate?.provisional

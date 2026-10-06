@@ -2305,6 +2305,8 @@ class PriceEstimator {
 
   getCachedEstimates(league?: string) {
     const cacheKey = `price_estimates`;
+    // Migrate existing suggestions before the cache can discard an expired value.
+    Cache.setExpiry(cacheKey);
     const data = Cache.getJson<Record<string, Estimate>>(cacheKey) || {};
     if (league === undefined) {
       return data;
@@ -2319,20 +2321,20 @@ class PriceEstimator {
 
   cachePriceEstimate(itemId: string, estimate: Estimate) {
     const cacheKey = `price_estimates`;
-    const data = Cache.getJson<Record<string, Estimate>>(cacheKey) || {};
+    const data = this.getCachedEstimates();
     data[itemId] = { ...estimate, checkedAt: estimate.checkedAt || Date.now() };
-    Cache.setJson(cacheKey, data, Cache.times.day);
+    Cache.setJson(cacheKey, data);
   }
 
   removeCachedEstimate(itemId: string) {
     const cacheKey = `price_estimates`;
-    const data = Cache.getJson<Record<string, Estimate>>(cacheKey) || {};
+    const data = this.getCachedEstimates();
     if (!(itemId in data)) {
       return;
     }
 
     delete data[itemId];
-    Cache.setJson(cacheKey, data, Cache.times.day);
+    Cache.setJson(cacheKey, data);
   }
 
   priceEstimate(prices: Price[], options: PriceAnalysisOptions = {}) {

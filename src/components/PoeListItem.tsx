@@ -1,3 +1,4 @@
+import { PriceCheckAge } from "./PriceCheckAge";
 import {
   formatDateTime,
   formatPriceAmount,
@@ -387,8 +388,7 @@ export function PoeListItem(props: {
                 : marketIsPrimary
                   ? `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency}`
                   : `Suggested price: ${formatPriceAmount(priceEstimate.price.amount)} ${priceEstimate.price.currency} | Spread: ${formatPriceAmount(priceEstimate.stdDev.amount)} ${priceEstimate.stdDev.currency}`}
-              {priceEstimate.checkedAt !== undefined &&
-                ` | Checked at: ${formatDateTime(priceEstimate.checkedAt)}`}
+              <PriceCheckAge estimate={priceEstimate} />
             </p>
           </details>
         )}

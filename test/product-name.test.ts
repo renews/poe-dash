@@ -51,7 +51,7 @@ test("publishes every desktop artifact for version tags", async () => {
     Bun.file(`${import.meta.dir}/../README.md`).text(),
   ]);
 
-  expect(packageJson.version).toBe("1.0.4");
+  expect(packageJson.version).toBe("1.0.5");
   expect(workflow).toContain('tags: ["v*"]');
   expect(workflow).toContain("ubuntu-latest");
   expect(workflow).toContain("windows-latest");
