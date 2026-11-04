@@ -60,12 +60,18 @@ test("captures only newly copied Path of Exile item text", async () => {
   expect(isPoeItemText(NEW_ITEM)).toBe(true);
 });
 
-test("captures and restores with asynchronous Electron clipboard reads", async () => {
+test("captures and restores with asynchronous Electron clipboard operations", async () => {
   let clipboard = OLD_ITEM;
   const dependencies = {
     readText: async () => clipboard,
-    writeText: (text: string) => { clipboard = text; },
-    pressCopy: () => { clipboard = NEW_ITEM; },
+    writeText: async (text: string) => {
+      await Promise.resolve();
+      clipboard = text;
+    },
+    pressCopy: () => {
+      expect(clipboard).toBe("");
+      clipboard = NEW_ITEM;
+    },
     wait: async () => {},
   };
   expect(await capturePoeItemText(dependencies)).toBe(NEW_ITEM);

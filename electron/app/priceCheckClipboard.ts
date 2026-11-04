@@ -15,7 +15,7 @@ const PATH_OF_EXILE_STEAM_WINDOW_CLASSES = new Set([
 
 interface PriceCheckClipboardDependencies {
   readText: () => string | Promise<string>;
-  writeText: (text: string) => void;
+  writeText: (text: string) => void | Promise<void>;
   pressCopy: () => void | Promise<void>;
   wait?: (milliseconds: number) => Promise<void>;
 }
@@ -168,7 +168,7 @@ export async function capturePoeItemText(
     options.clipboardMarker ?? (clearedStaleItem ? "" : undefined);
 
   if (clipboardResetText !== undefined) {
-    dependencies.writeText(clipboardResetText);
+    await dependencies.writeText(clipboardResetText);
   }
 
   try {
@@ -190,7 +190,7 @@ export async function capturePoeItemText(
       clipboardResetText !== undefined ||
       (await dependencies.readText()) !== previousText
     ) {
-      dependencies.writeText(previousText);
+      await dependencies.writeText(previousText);
     }
     throw error;
   }
