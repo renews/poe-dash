@@ -24,6 +24,7 @@ declare namespace NodeJS {
 // Used in Renderer process, expose in `preload.ts`
 interface Window {
   desktopApi?: {
+    getPathForFile(file: File): string;
     priceCheck?: {
       getShortcutStatus: () => Promise<{
         registered: boolean;

@@ -200,7 +200,7 @@ const MessagesPage: React.FC = () => {
         <input
           type="file"
           onChange={(e) =>
-            setChatFilePath(e.target.files?.[0]?.path || "")
+            setChatFilePath(e.target.files?.[0] ? (window.desktopApi?.getPathForFile(e.target.files[0]) || "") : "")
           }
           accept=".txt,.log,.json"
           className={`${formFieldClassName} mr-2 file:mr-4 file:rounded-md file:border-0 file:bg-blue-500 file:px-3 file:py-1 file:font-semibold file:text-white hover:file:bg-blue-600`}

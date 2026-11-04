@@ -14,7 +14,7 @@ const PATH_OF_EXILE_STEAM_WINDOW_CLASSES = new Set([
 ]);
 
 interface PriceCheckClipboardDependencies {
-  readText: () => string;
+  readText: () => string | Promise<string>;
   writeText: (text: string) => void;
   pressCopy: () => void | Promise<void>;
   wait?: (milliseconds: number) => Promise<void>;
@@ -162,7 +162,7 @@ export async function capturePoeItemText(
   const pollIntervalMs = options.pollIntervalMs ?? 48;
   const timeoutMs = options.timeoutMs ?? 500;
   const wait = dependencies.wait || defaultWait;
-  const previousText = dependencies.readText();
+  const previousText = await dependencies.readText();
   const clearedStaleItem = isPoeItemText(previousText);
   const clipboardResetText =
     options.clipboardMarker ?? (clearedStaleItem ? "" : undefined);
@@ -176,7 +176,7 @@ export async function capturePoeItemText(
 
     for (let elapsed = 0; elapsed < timeoutMs; elapsed += pollIntervalMs) {
       await wait(pollIntervalMs);
-      const copiedText = dependencies.readText();
+      const copiedText = await dependencies.readText();
       if (isPoeItemText(copiedText)) {
         return copiedText;
       }
@@ -188,7 +188,7 @@ export async function capturePoeItemText(
   } catch (error) {
     if (
       clipboardResetText !== undefined ||
-      dependencies.readText() !== previousText
+      (await dependencies.readText()) !== previousText
     ) {
       dependencies.writeText(previousText);
     }

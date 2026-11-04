@@ -352,7 +352,7 @@ export function PriceCheckPage(props: {
   const [estimate, setEstimate] = useState<Estimate>();
   const [modifierSelection, setModifierSelection] =
     useState<ModifierSelection>();
-  const modifierSelectionRef = useRef<ModifierSelection>();
+  const modifierSelectionRef = useRef<ModifierSelection | undefined>(undefined);
   const [status, setStatus] = useState<PriceCheckStatus>("idle");
   const [requestState, setRequestState] = useState<ApiRequestState>();
   const [error, setError] = useState<string>();
@@ -363,9 +363,9 @@ export function PriceCheckPage(props: {
       shortcut: priceCheckShortcut,
       error: "Checking desktop shortcut availability.",
     });
-  const activeRequest = useRef<AbortController>();
-  const officialTradeRequest = useRef<AbortController>();
-  const handledCapture = useRef<number>();
+  const activeRequest = useRef<AbortController | undefined>(undefined);
+  const officialTradeRequest = useRef<AbortController | undefined>(undefined);
+  const handledCapture = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let active = true;
