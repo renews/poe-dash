@@ -43,7 +43,7 @@ jobs:
           - os: windows-latest
             artifact: windows-apps
             path: release/*/*.exe
-          - os: macos-15-intel
+          - os: macos-26-intel
             artifact: macos-dmg
             path: release/*/*.dmg
     runs-on: ${{ matrix.os }}
