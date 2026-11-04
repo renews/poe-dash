@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import path from "node:path";
 import {
   getSavedChatFilePath,
   saveChatFilePath,
@@ -32,9 +33,9 @@ test("ignores an empty saved chat log path", () => {
 
 test("uses a stable per-user config path", () => {
   expect(getStableConfigPath("/home/coder", "")).toBe(
-    "/home/coder/.config/poe-dash/config.json",
+    path.join("/home/coder", ".config", "poe-dash", "config.json"),
   );
   expect(getStableConfigPath("/home/coder", "/tmp/config")).toBe(
-    "/tmp/config/poe-dash/config.json",
+    path.join("/tmp/config", "poe-dash", "config.json"),
   );
 });

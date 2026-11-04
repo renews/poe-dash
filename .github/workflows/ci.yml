@@ -35,5 +35,10 @@ jobs:
       - name: Build release artifacts
         run: bun run build
 
+      - name: Verify packaged native modules (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node scripts/check-packaged-native.cjs
+
       - name: Verify packaged native modules
+        if: runner.os != 'Linux'
         run: node scripts/check-packaged-native.cjs
