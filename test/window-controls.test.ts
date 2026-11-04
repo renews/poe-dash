@@ -47,9 +47,9 @@ test("renders accessible custom window controls", () => {
 });
 
 test("configures the Electron window as a custom frameless surface", async () => {
-  const mainSource = await Bun.file(
+  const mainSource = (await Bun.file(
     `${import.meta.dir}/../electron/main.ts`,
-  ).text();
+  ).text()).replace(/\r\n/g, "\n");
   const preloadSource = await Bun.file(
     `${import.meta.dir}/../electron/preload.ts`,
   ).text();

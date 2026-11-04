@@ -56,7 +56,7 @@ export function parseRateLimitHeaders(
   const policy = lowerCaseHeaders["x-rate-limit-policy"];
 
   // Determine the list of rules. If a rules header is provided, use it; otherwise, infer.
-  let ruleNames: string[] = [];
+  let ruleNames: string[];
   if (lowerCaseHeaders["x-rate-limit-rules"]) {
     ruleNames = lowerCaseHeaders["x-rate-limit-rules"]
       .split(",")

@@ -15,8 +15,8 @@ export default defineConfig({
         entry: 'electron/main.ts',
         vite: {
           build: {
-            rollupOptions: {
-              external: ['uiohook-napi'],
+            rolldownOptions: {
+              external: ['uiohook-napi', 'bufferutil', 'utf-8-validate'],
             },
           },
         },

@@ -85,7 +85,7 @@ test("renders the live footer at app level without a visibility condition", asyn
     Bun.file(`${import.meta.dir}/../src/components/MainPage.tsx`).text(),
   ]);
 
-  expect(appSource).toContain("<LiveMonitor\n");
+  expect(appSource).toMatch(/<LiveMonitor\r?\n/);
   expect(appSource).not.toContain("{isLiveMonitoring && (");
-  expect(mainPageSource).not.toContain("<LiveMonitor\n");
+  expect(mainPageSource).not.toMatch(/<LiveMonitor\r?\n/);
 });

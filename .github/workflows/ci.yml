@@ -6,11 +6,20 @@ on:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -25,3 +34,11 @@ jobs:
 
       - name: Build release artifacts
         run: bun run build
+
+      - name: Verify packaged native modules (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node scripts/check-packaged-native.cjs
+
+      - name: Verify packaged native modules
+        if: runner.os != 'Linux'
+        run: node scripts/check-packaged-native.cjs

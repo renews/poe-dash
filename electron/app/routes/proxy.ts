@@ -26,7 +26,7 @@ export const proxy = async (req: Request, res: Response) => {
     const usePoeApiPolicy = isPathOfExileHost(host.url);
     const remainder = req.url.split("/").slice(2).join("/");
     const url = `https://${host.url}/${remainder}`;
-    const params = {
+    const params: Electron.ClientRequestConstructorOptions = {
       url,
       method: req.method,
       headers: {

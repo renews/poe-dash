@@ -55,7 +55,7 @@ test("publishes every desktop artifact for version tags", async () => {
   expect(workflow).toContain('tags: ["v*"]');
   expect(workflow).toContain("ubuntu-latest");
   expect(workflow).toContain("windows-latest");
-  expect(workflow).toContain("macos-15-intel");
+  expect(workflow).toContain("macos-26-intel");
   expect(workflow).toContain("release/*/*.AppImage");
   expect(workflow).toContain("release/*/*.exe");
   expect(workflow).toContain("release/*/*.dmg");

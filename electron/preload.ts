@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { createBufferedPriceCheckChannel } from "./app/priceCheckClipboard";
 
 type WindowControlAction = "minimize" | "toggle-maximize" | "close";
@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld("windowControls", {
 });
 
 contextBridge.exposeInMainWorld("desktopApi", {
+  getPathForFile(file: File) {
+    return webUtils.getPathForFile(file);
+  },
   priceCheck: {
     getShortcutStatus() {
       return ipcRenderer.invoke("price-check-shortcut-status") as Promise<{

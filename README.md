@@ -68,6 +68,9 @@ Show item details of purchase offers if you have them in the item database
 
 ## Devs Getting Started
 
+Use Node.js 24 or newer and Bun 1.4.4 (see `.node-version` and `.bun-version`).
+`bun.lock` is authoritative for CI; keep `package-lock.json` synchronized for npm tooling.
+
 1. Clone the repository
 2. Install dependencies with `bun install`
 3. Run the application with `bun run dev`
